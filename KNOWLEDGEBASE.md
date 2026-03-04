@@ -21,15 +21,13 @@
 - `admin_email` is required (no default — must be set in tfvars)
 - `lambda-remediation` module handles all 4 fns: s3, iam, vpc, verification
 
-**Issues:** VS Code shows "No declaration found" errors after creating new files — this is the Terraform Language Server cache not refreshing. Fix: `Ctrl+Shift+P` → `Terraform: Restart Language Server`. `terraform validate` confirms code is actually valid.
-
-**Next:** Stage 2 — Security Hub + AWS Config
+**Issues:** VS Code shows "No declaration found" errors after creating new files — Terraform Language Server cache not refreshing. Fix: `Ctrl+Shift+P` → `Terraform: Restart Language Server`. `terraform validate` confirms code is actually valid.
 
 ---
 
 ## Stage 1 — IAM Roles & Budget Alert — COMPLETED ✅
 **Date:** 2026-03-05
-**Resources:** No AWS resources deployed yet (deployed in Stage apply)
+**Git hash:** dc1a945
 **Terraform files:**
 - `terraform/modules/iam/main.tf` — 7 IAM roles + inline policies
 - `terraform/modules/iam/outputs.tf` — 7 role ARN outputs
@@ -50,22 +48,45 @@
 
 **Decisions:**
 - All IAM policies are inline (not managed) for simplicity and auditability
-- Least-privilege: each role only gets what it needs
+- Least-privilege: each role scoped to minimum required permissions
 - Lambda log permissions scoped to `/aws/security-automation` log group only
 - AI Analyzer Secrets Manager permission scoped to `security-automation/ai-api-key*` ARN
 - Step Functions Lambda invoke scoped to `security-auto-*` function name prefix
 
-**Validation:** `terraform init` ✅ | `terraform validate` ✅ (Success)
+**Validation:** `terraform validate` ✅
 
-**Next:** Stage 2 — Security Hub + AWS Config
+---
+
+## Stage 2 — Security Hub + AWS Config — COMPLETED ✅
+**Date:** 2026-03-05
+**Terraform files:**
+- `terraform/modules/security-hub/main.tf` — Security Hub + Config recorder + delivery
+
+**AWS Resources defined:**
+| Resource | Name/Value |
+|----------|-----------|
+| Security Hub | Enabled on account |
+| CIS Benchmark | v1.4.0 standard subscription |
+| FSBP | AWS Foundational Security Best Practices v1.0.0 |
+| Config S3 Bucket | `security-auto-config-logs-{account_id}` |
+| Config IAM Role | `SecurityAutomation-AWSConfigRole` |
+| Config Recorder | `security-auto-recorder` — all resources + global |
+| Delivery Channel | `security-auto-delivery-channel` → S3 bucket |
+
+**Decisions:**
+- S3 bucket for Config logs: public access blocked, AES256 encrypted, `force_destroy=true` for easy teardown
+- Bucket policy scoped with `AWS:SourceAccount` condition (prevents confused deputy)
+- Config recorder: `all_supported = true` + `include_global_resource_types = true`
+- Separate IAM role for Config (attached AWS managed `AWS_ConfigRole` + inline S3 policy)
+
+**Validation:** `terraform validate` ✅
 
 ---
 
 ## CONTINUATION GUIDE (if chat resets)
 1. Read `Project_prompt.txt` at `c:\Storage\Projects\Cloud_automation\Project_prompt.txt`
 2. Working dir: `c:\Storage\Projects\Cloud_automation\aws-security-automation\`
-3. Current stage: Starting **Stage 2 — Security Hub + AWS Config**
-4. Run `terraform validate` in `terraform/` to confirm baseline is clean
-5. GitHub repo: needs to be created — run in PowerShell:
-   `gh auth login` then `gh repo create aws-security-automation --public --source=. --remote=origin --push`
-6. All VS Code "No declaration found" errors = Language Server cache issue, not real errors
+3. GitHub repo: `https://github.com/CynicPoet/aws-security-automation`
+4. Current stage: Starting **Stage 3 — CloudWatch Log Group + Dashboard**
+5. Run `terraform validate` in `terraform/` — should say "Success"
+6. All VS Code "No declaration found" errors = Language Server cache, not real — ignore or restart LS
