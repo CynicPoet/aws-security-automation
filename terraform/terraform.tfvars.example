@@ -1,0 +1,9 @@
+# Copy this file to terraform.tfvars and fill in your values
+# NEVER commit terraform.tfvars to git
+
+aws_region       = "us-east-1"
+project_name     = "security-auto"
+admin_email      = "your-email@example.com"
+ai_provider      = "gemini"
+ai_model         = "gemini-2.5-flash"
+budget_limit_usd = 5
