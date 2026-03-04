@@ -1,0 +1,7 @@
+# Lambda AI Analyzer — Runtime Dependencies
+# No external packages required.
+# All HTTP calls use Python stdlib urllib.request (no google-generativeai or anthropic SDK needed).
+# boto3 is provided by the Lambda runtime (AWS SDK for Python).
+#
+# Python stdlib used: json, logging, os, re, time, urllib.request, urllib.error, abc, datetime
+# AWS SDK: boto3 (built-in Lambda runtime)
