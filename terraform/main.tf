@@ -4,6 +4,11 @@ module "iam" {
   aws_region   = var.aws_region
 }
 
+module "dynamodb" {
+  source       = "./modules/dynamodb"
+  project_name = var.project_name
+}
+
 module "budget" {
   source           = "./modules/budget"
   project_name     = var.project_name
@@ -37,8 +42,9 @@ module "lambda_remediation" {
   lambda_remediation_role_arn = module.iam.lambda_remediation_role_arn
   lambda_verify_role_arn      = module.iam.lambda_verification_role_arn
   log_group_name              = module.cloudwatch.log_group_name
+  findings_table_name         = module.dynamodb.findings_table_name
 
-  depends_on = [module.iam, module.cloudwatch]
+  depends_on = [module.iam, module.cloudwatch, module.dynamodb]
 }
 
 module "lambda_ai_analyzer" {
@@ -61,8 +67,10 @@ module "lambda_notification" {
   log_group_name         = module.cloudwatch.log_group_name
   sns_topic_arn          = module.sns.admin_alerts_topic_arn
   api_gateway_base_url   = module.api_gateway.base_url
+  findings_table_name    = module.dynamodb.findings_table_name
+  settings_table_name    = module.dynamodb.settings_table_name
 
-  depends_on = [module.iam, module.cloudwatch, module.sns, module.api_gateway]
+  depends_on = [module.iam, module.cloudwatch, module.sns, module.api_gateway, module.dynamodb]
 }
 
 module "lambda_approval" {
@@ -75,13 +83,25 @@ module "lambda_approval" {
   depends_on = [module.iam, module.cloudwatch]
 }
 
-module "api_gateway" {
-  source                        = "./modules/api-gateway"
-  project_name                  = var.project_name
-  lambda_approval_function_arn  = module.lambda_approval.function_arn
-  lambda_approval_function_name = module.lambda_approval.function_name
+module "lambda_dashboard" {
+  source                    = "./modules/lambda-dashboard"
+  lambda_dashboard_role_arn = module.iam.lambda_dashboard_role_arn
+  findings_table_name       = module.dynamodb.findings_table_name
+  settings_table_name       = module.dynamodb.settings_table_name
+  log_group_name            = module.cloudwatch.log_group_name
 
-  depends_on = [module.lambda_approval]
+  depends_on = [module.iam, module.dynamodb, module.cloudwatch]
+}
+
+module "api_gateway" {
+  source                         = "./modules/api-gateway"
+  project_name                   = var.project_name
+  lambda_approval_function_arn   = module.lambda_approval.function_arn
+  lambda_approval_function_name  = module.lambda_approval.function_name
+  lambda_dashboard_function_arn  = module.lambda_dashboard.function_arn
+  lambda_dashboard_function_name = module.lambda_dashboard.function_name
+
+  depends_on = [module.lambda_approval, module.lambda_dashboard]
 }
 
 module "step_functions" {

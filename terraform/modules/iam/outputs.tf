@@ -32,3 +32,8 @@ output "eventbridge_role_arn" {
   description = "ARN of the EventBridge IAM role"
   value       = aws_iam_role.eventbridge.arn
 }
+
+output "lambda_dashboard_role_arn" {
+  description = "ARN of the Lambda dashboard IAM role"
+  value       = aws_iam_role.lambda_dashboard.arn
+}

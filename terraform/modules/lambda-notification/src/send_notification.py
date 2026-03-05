@@ -1,204 +1,218 @@
 """
-send_notification.py — Admin notification Lambda.
+send_notification.py — stores findings to DynamoDB and optionally sends SNS email.
 
-Builds a rich plain-text + HTML email with the AI analysis and clickable
-approve/reject links, then publishes it to the SNS admin alerts topic.
-
-The task_token (Step Functions callback token) is URL-encoded into the
-approval links so the admin's click routes back to the approval Lambda.
-
-Environment variables:
-  SNS_TOPIC_ARN        — ARN of security-automation-admin-alerts SNS topic
-  API_GATEWAY_BASE_URL — Base URL of the approval API Gateway (e.g. https://xxx.execute-api...)
-  AWS_REGION           — AWS region
+Called by Step Functions NotifyAdmin state (waitForTaskToken).
+Email is only sent when the 'email_notifications' setting is 'true' in DynamoDB.
 
 Input event:
   {
     "finding":     { finding_id, resource_type, resource_id, severity, title, description, ... },
     "ai_analysis": { risk_level, analysis, recommended_actions, escalation_reason, ... },
-    "task_token":  "step-functions-callback-token-base64..."
+    "task_token":  "step-functions-callback-token..."   (may be absent for auto-remediations)
   }
-
-Returns:
-  { "status": "SENT", "message_id": "...", "recipient_topic": "..." }
 """
 
 import json
 import logging
 import os
+import time
 import urllib.parse
 import boto3
+from datetime import datetime, timezone
 from botocore.exceptions import ClientError
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-SNS_TOPIC_ARN = os.environ.get("SNS_TOPIC_ARN", "")
+SNS_TOPIC_ARN        = os.environ.get("SNS_TOPIC_ARN", "")
 API_GATEWAY_BASE_URL = os.environ.get("API_GATEWAY_BASE_URL", "").rstrip("/")
-REGION = os.environ.get("AWS_REGION", "us-east-1")
+FINDINGS_TABLE       = os.environ.get("FINDINGS_TABLE", "")
+SETTINGS_TABLE       = os.environ.get("SETTINGS_TABLE", "")
+AWS_REGION_NAME      = os.environ.get("AWS_REGION", "us-east-1")
 
-sns = boto3.client("sns", region_name=REGION)
+sns      = boto3.client("sns", region_name=AWS_REGION_NAME)
+dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION_NAME)
 
 SEVERITY_EMOJI = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "🟢"}
 
 
-def lambda_handler(event: dict, context) -> dict:
-    """Entry point — build and send the admin notification email."""
-    finding = event.get("finding", {})
-    ai_analysis = event.get("ai_analysis", {})
-    task_token = event.get("task_token", "")
+# ── HELPERS ────────────────────────────────────────────────────────────────────
 
-    resource_type = finding.get("resource_type", "Unknown")
-    resource_id = finding.get("resource_id", "unknown")
-    finding_id = finding.get("finding_id", "unknown")
-    severity = finding.get("severity", "HIGH")
-    title = finding.get("title", "Security Finding Detected")
-    description = finding.get("description", "")
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
 
-    risk_level = ai_analysis.get("risk_level", severity)
-    analysis_text = ai_analysis.get("analysis", "No AI analysis available.")
-    escalation_reason = ai_analysis.get("escalation_reason", "")
-    recommended_actions = ai_analysis.get("recommended_actions", [])
 
-    emoji = SEVERITY_EMOJI.get(severity, "⚠️")
+def ttl_30_days():
+    return int(time.time()) + 30 * 24 * 3600
 
-    _log("ADMIN_NOTIFIED", finding_id, resource_type, resource_id, severity,
-         f"Building admin notification for '{resource_id}'")
 
-    # ── BUILD APPROVAL LINKS ──────────────────────────────────────────────────
-    encoded_token = urllib.parse.quote(task_token, safe="")
-    approve_links = []
-    for action in recommended_actions:
-        action_id = action.get("action_id", 1)
-        desc = action.get("description", f"Action {action_id}")
-        link = f"{API_GATEWAY_BASE_URL}/approve?token={encoded_token}&action={action_id}"
-        approve_links.append({"action_id": action_id, "description": desc, "link": link})
-
-    reject_link = f"{API_GATEWAY_BASE_URL}/reject?token={encoded_token}"
-    manual_link = f"{API_GATEWAY_BASE_URL}/manual?token={encoded_token}"
-
-    # ── BUILD EMAIL SUBJECT ───────────────────────────────────────────────────
-    subject = f"{emoji} [{severity}] Security Finding — Action Required: {_short_resource(resource_id)}"
-    # SNS subject limit = 100 chars
-    subject = subject[:100]
-
-    # ── BUILD EMAIL BODY ──────────────────────────────────────────────────────
-    body = _build_email_body(
-        emoji=emoji,
-        severity=severity,
-        risk_level=risk_level,
-        title=title,
-        description=description,
-        resource_type=resource_type,
-        resource_id=resource_id,
-        finding_id=finding_id,
-        analysis_text=analysis_text,
-        escalation_reason=escalation_reason,
-        approve_links=approve_links,
-        reject_link=reject_link,
-        manual_link=manual_link,
-    )
-
-    # ── PUBLISH TO SNS ────────────────────────────────────────────────────────
+def is_email_enabled():
+    if not SETTINGS_TABLE:
+        return False
     try:
-        response = sns.publish(
-            TopicArn=SNS_TOPIC_ARN,
-            Subject=subject,
-            Message=body,
-        )
-        message_id = response.get("MessageId", "unknown")
-    except ClientError as exc:
-        _log("ERROR", finding_id, resource_type, resource_id, severity,
-             f"Failed to publish SNS notification: {exc.response['Error']['Message']}")
-        raise
+        table = dynamodb.Table(SETTINGS_TABLE)
+        result = table.get_item(Key={"setting_key": "email_notifications"})
+        return result.get("Item", {}).get("value", "false") == "true"
+    except Exception:
+        return False
 
-    _log("ADMIN_NOTIFIED", finding_id, resource_type, resource_id, severity,
-         f"Admin notification sent — MessageId={message_id}")
 
-    return {
-        "status": "SENT",
-        "message_id": message_id,
-        "recipient_topic": SNS_TOPIC_ARN,
+def store_finding(finding, ai_analysis, task_token, status):
+    if not FINDINGS_TABLE:
+        return
+    table = dynamodb.Table(FINDINGS_TABLE)
+
+    rec_actions = ai_analysis.get("recommended_actions", [])
+    if isinstance(rec_actions, str):
+        try:
+            rec_actions = json.loads(rec_actions)
+        except Exception:
+            rec_actions = []
+
+    item = {
+        "finding_id":          finding.get("finding_id", "unknown"),
+        "resource_type":       finding.get("resource_type", ""),
+        "resource_id":         finding.get("resource_id", ""),
+        "severity":            finding.get("severity", "MEDIUM"),
+        "title":               finding.get("title", finding.get("description", finding.get("finding_id", ""))),
+        "description":         finding.get("description", ""),
+        "ai_analysis":         json.dumps(ai_analysis),
+        "recommended_actions": json.dumps(rec_actions),
+        "risk_level":          ai_analysis.get("risk_level", ""),
+        "status":              status,
+        "created_at":          now_iso(),
+        "updated_at":          now_iso(),
+        "ttl_epoch":           ttl_30_days(),
+        "environment":         finding.get("environment", ""),
+        "action_taken":        "",
     }
+    if task_token:
+        item["task_token"] = task_token
+
+    table.put_item(Item=item)
+    _log("FINDING_STORED", item["finding_id"], item["resource_type"],
+         item["resource_id"], item["severity"], f"Stored to DynamoDB, status={status}")
 
 
-# ── EMAIL BUILDER ─────────────────────────────────────────────────────────────
+def _build_email_body(finding, ai_analysis, task_token):
+    finding_id        = finding.get("finding_id", "unknown")
+    resource_type     = finding.get("resource_type", "Unknown")
+    resource_id       = finding.get("resource_id", "N/A")
+    severity          = finding.get("severity", "HIGH")
+    title             = finding.get("title", "Security Finding")
+    description       = finding.get("description", "")
+    analysis_text     = ai_analysis.get("analysis", "No AI analysis available.")
+    escalation_reason = ai_analysis.get("escalation_reason", "")
+    risk_level        = ai_analysis.get("risk_level", severity)
+    emoji             = SEVERITY_EMOJI.get(severity.upper(), "⚠️")
 
-def _build_email_body(
-    emoji, severity, risk_level, title, description, resource_type, resource_id,
-    finding_id, analysis_text, escalation_reason, approve_links, reject_link, manual_link,
-) -> str:
-    """Build the plain-text email body for admin review."""
+    rec_actions = ai_analysis.get("recommended_actions", [])
+    if isinstance(rec_actions, str):
+        try:
+            rec_actions = json.loads(rec_actions)
+        except Exception:
+            rec_actions = []
+
+    encoded_token  = urllib.parse.quote(task_token, safe="")
+    dashboard_url  = f"{API_GATEWAY_BASE_URL}/dashboard"
+    reject_link    = f"{API_GATEWAY_BASE_URL}/reject?token={encoded_token}"
+    manual_link    = f"{API_GATEWAY_BASE_URL}/manual?token={encoded_token}"
+
     lines = [
-        f"{'='*70}",
+        "=" * 70,
         f"  {emoji} SECURITY ALERT — ACTION REQUIRED",
-        f"{'='*70}",
+        "=" * 70,
         "",
-        f"FINDING:   {title}",
-        f"RESOURCE:  {resource_type} — {resource_id}",
-        f"SEVERITY:  {severity}  |  AI RISK LEVEL: {risk_level}",
+        f"FINDING   : {title}",
+        f"RESOURCE  : {resource_type} — {resource_id}",
+        f"SEVERITY  : {severity}  |  AI RISK: {risk_level}",
         f"FINDING ID: {finding_id}",
         "",
-        f"{'─'*70}",
+        "─" * 70,
         "  DESCRIPTION",
-        f"{'─'*70}",
+        "─" * 70,
         description or "(no description)",
         "",
-        f"{'─'*70}",
+        "─" * 70,
         "  AI ANALYSIS",
-        f"{'─'*70}",
+        "─" * 70,
         analysis_text,
     ]
-
     if escalation_reason:
         lines += ["", f"WHY ESCALATED: {escalation_reason}"]
-
-    lines += [
-        "",
-        f"{'─'*70}",
-        "  RECOMMENDED ACTIONS",
-        f"{'─'*70}",
-    ]
-
-    if approve_links:
-        for item in approve_links:
-            lines.append(f"  [{item['action_id']}] {item['description']}")
-            lines.append(f"      APPROVE → {item['link']}")
-            lines.append("")
-    else:
-        lines.append("  No specific actions available — manual review recommended.")
-        lines.append("")
-
+    lines += ["", "─" * 70, "  RECOMMENDED ACTIONS (click to approve)", "─" * 70]
+    for action in rec_actions:
+        action_id   = action.get("action_id", 1)
+        action_desc = action.get("description", f"Action {action_id}")
+        approve_url = f"{API_GATEWAY_BASE_URL}/approve?token={encoded_token}&action={action_id}"
+        lines += [f"  [{action_id}] {action_desc}", f"      APPROVE -> {approve_url}", ""]
     lines += [
         f"  [M] I will handle this manually:",
-        f"      MANUAL  → {manual_link}",
+        f"      MANUAL  -> {manual_link}",
         "",
-        f"  [R] This is a false positive / reject:",
-        f"      REJECT  → {reject_link}",
+        f"  [R] This is a false positive:",
+        f"      REJECT  -> {reject_link}",
         "",
-        f"{'─'*70}",
-        "  ⏰ Auto-skip in 60 minutes if no response.",
-        f"{'─'*70}",
+        "─" * 70,
+        "  OR USE THE DASHBOARD (recommended):",
+        f"  {dashboard_url}",
+        "─" * 70,
         "",
-        "This notification was generated by the AWS Security Automation Pipeline.",
+        "  Approval links expire in 60 minutes.",
+        "=" * 70,
     ]
-
     return "\n".join(lines)
 
 
-# ── HELPERS ───────────────────────────────────────────────────────────────────
+# ── MAIN HANDLER ───────────────────────────────────────────────────────────────
 
-def _short_resource(resource_id: str) -> str:
-    """Return last segment of ARN or full ID if not an ARN."""
-    return resource_id.split("/")[-1].split(":")[-1][:40]
+def lambda_handler(event, context):
+    finding     = event.get("finding", {})
+    ai_analysis = event.get("ai_analysis", {})
+    task_token  = event.get("task_token", "")
+    status_hint = event.get("status_hint", "PENDING_APPROVAL")
+
+    finding_id    = finding.get("finding_id", "unknown")
+    resource_type = finding.get("resource_type", "Unknown")
+    resource_id   = finding.get("resource_id", "N/A")
+    severity      = finding.get("severity", "HIGH")
+
+    status = "PENDING_APPROVAL" if task_token else status_hint
+
+    # 1. Always store to DynamoDB (regardless of email toggle)
+    try:
+        store_finding(finding, ai_analysis, task_token, status)
+    except Exception as exc:
+        logger.warning(f"DynamoDB write failed: {exc}")
+
+    result = {"status": "STORED", "finding_id": finding_id}
+
+    # 2. Send email only if toggle is ON and this is a pending-approval item
+    if task_token and is_email_enabled() and SNS_TOPIC_ARN:
+        try:
+            emoji   = SEVERITY_EMOJI.get(severity.upper(), "⚠️")
+            subject = (f"{emoji} [{severity}] Action Required: "
+                       f"{resource_id.split('/')[-1].split(':')[-1][:40]}")[:100]
+            body    = _build_email_body(finding, ai_analysis, task_token)
+            resp    = sns.publish(TopicArn=SNS_TOPIC_ARN, Subject=subject, Message=body)
+            _log("EMAIL_SENT", finding_id, resource_type, resource_id, severity,
+                 f"SNS email sent MessageId={resp['MessageId']}")
+            result["email_sent"]  = True
+            result["message_id"]  = resp["MessageId"]
+        except ClientError as exc:
+            logger.warning(f"SNS publish failed: {exc}")
+            result["email_sent"] = False
+    else:
+        result["email_sent"] = False
+        reason = "email_disabled" if not is_email_enabled() else ("no_task_token" if not task_token else "no_topic")
+        _log("EMAIL_SKIPPED", finding_id, resource_type, resource_id, severity, reason)
+
+    return result
 
 
 def _log(event_type, finding_id, resource_type, resource_id, severity, message):
     logger.info(json.dumps({
-        "event_type": event_type,
-        "finding_id": finding_id,
-        "resource_type": resource_type,
-        "resource_id": resource_id,
-        "severity": severity,
-        "message": message,
+        "event_type": event_type, "finding_id": finding_id,
+        "resource_type": resource_type, "resource_id": resource_id,
+        "severity": severity, "message": message,
     }))

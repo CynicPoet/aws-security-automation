@@ -150,6 +150,15 @@ data "aws_iam_policy_document" "lambda_verification_policy" {
   }
 
   statement {
+    sid    = "DynamoDBStatusUpdate"
+    effect = "Allow"
+    actions = [
+      "dynamodb:UpdateItem",
+    ]
+    resources = ["arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/security-automation-*"]
+  }
+
+  statement {
     sid    = "CloudWatchLogs"
     effect = "Allow"
     actions = [
@@ -245,6 +254,17 @@ data "aws_iam_policy_document" "lambda_notification_policy" {
   }
 
   statement {
+    sid    = "DynamoDBWrite"
+    effect = "Allow"
+    actions = [
+      "dynamodb:PutItem",
+      "dynamodb:UpdateItem",
+      "dynamodb:GetItem",
+    ]
+    resources = ["arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/security-automation-*"]
+  }
+
+  statement {
     sid    = "CloudWatchLogs"
     effect = "Allow"
     actions = [
@@ -260,6 +280,59 @@ resource "aws_iam_role_policy" "lambda_notification" {
   name   = "SecurityAutomation-LambdaNotificationPolicy"
   role   = aws_iam_role.lambda_notification.id
   policy = data.aws_iam_policy_document.lambda_notification_policy.json
+}
+
+# ─────────────────────────────────────────────
+# LAMBDA — DASHBOARD ROLE
+# ─────────────────────────────────────────────
+
+resource "aws_iam_role" "lambda_dashboard" {
+  name               = "SecurityAutomation-LambdaDashboardRole"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
+
+  tags = { Name = "SecurityAutomation-LambdaDashboardRole" }
+}
+
+data "aws_iam_policy_document" "lambda_dashboard_policy" {
+  statement {
+    sid    = "DynamoDBReadWrite"
+    effect = "Allow"
+    actions = [
+      "dynamodb:Scan",
+      "dynamodb:GetItem",
+      "dynamodb:PutItem",
+      "dynamodb:UpdateItem",
+      "dynamodb:Query",
+    ]
+    resources = ["arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/security-automation-*"]
+  }
+
+  statement {
+    sid    = "StepFunctionsCallback"
+    effect = "Allow"
+    actions = [
+      "states:SendTaskSuccess",
+      "states:SendTaskFailure",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "CloudWatchLogs"
+    effect = "Allow"
+    actions = [
+      "logs:CreateLogGroup",
+      "logs:CreateLogStream",
+      "logs:PutLogEvents",
+    ]
+    resources = ["arn:aws:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:log-group:/aws/lambda/security-auto-dashboard:*"]
+  }
+}
+
+resource "aws_iam_role_policy" "lambda_dashboard" {
+  name   = "SecurityAutomation-LambdaDashboardPolicy"
+  role   = aws_iam_role.lambda_dashboard.id
+  policy = data.aws_iam_policy_document.lambda_dashboard_policy.json
 }
 
 # ─────────────────────────────────────────────

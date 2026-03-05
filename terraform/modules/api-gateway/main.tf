@@ -102,6 +102,54 @@ resource "aws_api_gateway_method" "manual_get" {
   }
 }
 
+# ── /dashboard ────────────────────────────────────────────────────────────────
+
+resource "aws_api_gateway_resource" "dashboard" {
+  rest_api_id = aws_api_gateway_rest_api.approval_api.id
+  parent_id   = aws_api_gateway_rest_api.approval_api.root_resource_id
+  path_part   = "dashboard"
+}
+
+resource "aws_api_gateway_method" "dashboard_get" {
+  rest_api_id   = aws_api_gateway_rest_api.approval_api.id
+  resource_id   = aws_api_gateway_resource.dashboard.id
+  http_method   = "GET"
+  authorization = "NONE"
+}
+
+resource "aws_api_gateway_integration" "dashboard" {
+  rest_api_id             = aws_api_gateway_rest_api.approval_api.id
+  resource_id             = aws_api_gateway_resource.dashboard.id
+  http_method             = aws_api_gateway_method.dashboard_get.http_method
+  integration_http_method = "POST"
+  type                    = "AWS_PROXY"
+  uri                     = "arn:aws:apigateway:${data.aws_region.current.name}:lambda:path/2015-03-31/functions/${var.lambda_dashboard_function_arn}/invocations"
+}
+
+# ── /dashboard/{proxy+} ───────────────────────────────────────────────────────
+
+resource "aws_api_gateway_resource" "dashboard_proxy" {
+  rest_api_id = aws_api_gateway_rest_api.approval_api.id
+  parent_id   = aws_api_gateway_resource.dashboard.id
+  path_part   = "{proxy+}"
+}
+
+resource "aws_api_gateway_method" "dashboard_proxy_any" {
+  rest_api_id   = aws_api_gateway_rest_api.approval_api.id
+  resource_id   = aws_api_gateway_resource.dashboard_proxy.id
+  http_method   = "ANY"
+  authorization = "NONE"
+}
+
+resource "aws_api_gateway_integration" "dashboard_proxy" {
+  rest_api_id             = aws_api_gateway_rest_api.approval_api.id
+  resource_id             = aws_api_gateway_resource.dashboard_proxy.id
+  http_method             = aws_api_gateway_method.dashboard_proxy_any.http_method
+  integration_http_method = "POST"
+  type                    = "AWS_PROXY"
+  uri                     = "arn:aws:apigateway:${data.aws_region.current.name}:lambda:path/2015-03-31/functions/${var.lambda_dashboard_function_arn}/invocations"
+}
+
 # ── DEPLOYMENT + STAGE ────────────────────────────────────────────────────────
 
 resource "aws_api_gateway_deployment" "prod" {
@@ -118,6 +166,12 @@ resource "aws_api_gateway_deployment" "prod" {
       aws_api_gateway_resource.manual.id,
       aws_api_gateway_method.manual_get.id,
       aws_api_gateway_integration.manual.id,
+      aws_api_gateway_resource.dashboard.id,
+      aws_api_gateway_method.dashboard_get.id,
+      aws_api_gateway_integration.dashboard.id,
+      aws_api_gateway_resource.dashboard_proxy.id,
+      aws_api_gateway_method.dashboard_proxy_any.id,
+      aws_api_gateway_integration.dashboard_proxy.id,
     ]))
   }
 
@@ -129,6 +183,8 @@ resource "aws_api_gateway_deployment" "prod" {
     aws_api_gateway_integration.approve,
     aws_api_gateway_integration.reject,
     aws_api_gateway_integration.manual,
+    aws_api_gateway_integration.dashboard,
+    aws_api_gateway_integration.dashboard_proxy,
   ]
 }
 
@@ -140,12 +196,20 @@ resource "aws_api_gateway_stage" "prod" {
   tags = { Name = "SecurityAutomationApprovalAPI-prod" }
 }
 
-# ── LAMBDA PERMISSION ─────────────────────────────────────────────────────────
+# ── LAMBDA PERMISSIONS ────────────────────────────────────────────────────────
 
 resource "aws_lambda_permission" "api_gateway_invoke" {
   statement_id  = "AllowAPIGatewayInvoke"
   action        = "lambda:InvokeFunction"
   function_name = var.lambda_approval_function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_api_gateway_rest_api.approval_api.execution_arn}/*/*"
+}
+
+resource "aws_lambda_permission" "api_gateway_invoke_dashboard" {
+  statement_id  = "AllowAPIGatewayInvokeDashboard"
+  action        = "lambda:InvokeFunction"
+  function_name = var.lambda_dashboard_function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_api_gateway_rest_api.approval_api.execution_arn}/*/*"
 }

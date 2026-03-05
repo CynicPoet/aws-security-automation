@@ -22,3 +22,8 @@ variable "log_group_name" {
   description = "CloudWatch log group name to send structured logs to"
   type        = string
 }
+
+variable "findings_table_name" {
+  description = "DynamoDB findings table name for status updates"
+  type        = string
+}

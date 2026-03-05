@@ -9,6 +9,9 @@ locals {
     LOG_GROUP_NAME = var.log_group_name
     LOG_LEVEL      = "INFO"
   }
+  verify_env = merge(local.common_env, {
+    FINDINGS_TABLE = var.findings_table_name
+  })
 }
 
 # ── S3 REMEDIATION ────────────────────────────────────────────────────────────
@@ -96,7 +99,7 @@ resource "aws_lambda_function" "verification" {
   source_code_hash = data.archive_file.remediation.output_base64sha256
 
   environment {
-    variables = local.common_env
+    variables = local.verify_env
   }
 
   tags = { Name = "security-auto-verification" }

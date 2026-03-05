@@ -27,3 +27,13 @@ variable "api_gateway_base_url" {
   description = "Base URL of the API Gateway approval endpoint"
   type        = string
 }
+
+variable "findings_table_name" {
+  description = "DynamoDB findings table name"
+  type        = string
+}
+
+variable "settings_table_name" {
+  description = "DynamoDB settings table name"
+  type        = string
+}

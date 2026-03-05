@@ -18,6 +18,8 @@ resource "aws_lambda_function" "notification" {
     variables = {
       SNS_TOPIC_ARN        = var.sns_topic_arn
       API_GATEWAY_BASE_URL = var.api_gateway_base_url
+      FINDINGS_TABLE       = var.findings_table_name
+      SETTINGS_TABLE       = var.settings_table_name
       LOG_GROUP_NAME       = var.log_group_name
     }
   }

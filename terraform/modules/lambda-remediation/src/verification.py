@@ -28,10 +28,12 @@ from utils import StructuredLogger, update_finding_workflow, extract_bucket_name
 REGION = os.environ.get("AWS_REGION", "us-east-1")
 DENY_ALL_POLICY_NAME = "SecurityAutomation-EmergencyDenyAll"
 OPEN_CIDRS = {"0.0.0.0/0", "::/0"}
+FINDINGS_TABLE = os.environ.get("FINDINGS_TABLE", "")
 
 s3 = boto3.client("s3")
 iam = boto3.client("iam")
 ec2 = boto3.client("ec2", region_name=REGION)
+dynamodb = boto3.resource("dynamodb", region_name=REGION)
 
 
 def lambda_handler(event: dict, context) -> dict:
@@ -155,11 +157,27 @@ def _verify_vpc(log, finding: dict, resource_id: str) -> dict:
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 
 def _resolve_finding(finding: dict, note: str) -> None:
-    """Update Security Hub finding to RESOLVED. Non-fatal if it fails."""
+    """Update Security Hub finding to RESOLVED and DynamoDB status. Non-fatal if it fails."""
     if finding["finding_id"] != "unknown" and finding.get("product_arn"):
         try:
             update_finding_workflow(finding["finding_id"], finding["product_arn"], "RESOLVED", note, region=REGION)
         except ClientError:
+            pass
+    if FINDINGS_TABLE and finding["finding_id"] != "unknown":
+        try:
+            from datetime import datetime, timezone
+            table = dynamodb.Table(FINDINGS_TABLE)
+            table.update_item(
+                Key={"finding_id": finding["finding_id"]},
+                UpdateExpression="SET #s = :s, updated_at = :t, action_taken = :a",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={
+                    ":s": "RESOLVED",
+                    ":t": datetime.now(timezone.utc).isoformat(),
+                    ":a": note,
+                },
+            )
+        except Exception:
             pass
 
 

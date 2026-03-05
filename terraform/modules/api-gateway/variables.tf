@@ -12,3 +12,13 @@ variable "lambda_approval_function_name" {
   description = "Name of the approval handler Lambda function"
   type        = string
 }
+
+variable "lambda_dashboard_function_arn" {
+  description = "ARN of the dashboard Lambda function"
+  type        = string
+}
+
+variable "lambda_dashboard_function_name" {
+  description = "Name of the dashboard Lambda function"
+  type        = string
+}
