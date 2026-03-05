@@ -9,12 +9,12 @@
 6. NO Lambda Layers needed — all Python uses stdlib + boto3 only (Gemini/Claude via urllib.request)
 7. Archive provider: hashicorp/archive ~> 2.4 (already in providers.tf)
 8. CI GitHub Actions runs `terraform fmt -check -recursive` — always run `terraform fmt -recursive` before committing
-9. Infrastructure is DEPLOYED — API GW ID: f6bntx7jg3, Account: 024848485894
+9. Infrastructure is CURRENTLY DESTROYED — run `terraform apply` to redeploy
 
 ---
 
-## ✅ PROJECT COMPLETE — Dashboard Redesign + All Bugs Fixed
-**Latest git hash: 322cdff**
+## ✅ PROJECT COMPLETE — All Issues Fixed
+**Latest git hash: b4fa162**
 
 ---
 
