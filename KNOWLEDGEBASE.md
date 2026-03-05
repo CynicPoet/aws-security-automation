@@ -14,7 +14,12 @@
 ---
 
 ## ✅ PROJECT COMPLETE — All Issues Fixed
-**Latest git hash: b4fa162**
+**Latest git hash: 049247c**
+
+## One-Click Deploy/Destroy
+- **Deploy**: `.\scripts\quickdeploy.ps1` — applies terraform, sets Gemini key, opens dashboard URL
+- **Destroy**: `.\scripts\quickdestroy.ps1` — stops SFN executions, tears down all resources
+- **Config**: copy `scripts\config.ps1.example` → `scripts\config.ps1` and fill in credentials (gitignored)
 
 ---
 
