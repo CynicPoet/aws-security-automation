@@ -1,0 +1,8 @@
+# config.ps1.example — Copy this to config.ps1 and fill in your values
+# config.ps1 is gitignored so your credentials stay local
+
+$AWS_ACCESS_KEY_ID     = "AKIAXXXXXXXXXXXXXXXX"
+$AWS_SECRET_ACCESS_KEY = "your-secret-access-key-here"
+$AWS_REGION            = "us-east-1"
+$ADMIN_EMAIL           = "you@example.com"
+$GEMINI_API_KEY        = ""   # Optional: paste Gemini key to enable AI analysis
