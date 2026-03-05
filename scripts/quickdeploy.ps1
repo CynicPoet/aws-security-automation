@@ -24,7 +24,7 @@ function Write-OK($msg)               { Write-Host "  OK  $msg" -ForegroundColor
 function Write-Info($msg)             { Write-Host "  --  $msg" -ForegroundColor Cyan  }
 
 Write-Host "`n========================================" -ForegroundColor Cyan
-Write-Host "  AWS Security Automation — Quick Deploy" -ForegroundColor Cyan
+Write-Host "  AWS Security Automation - Quick Deploy" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 
 # ── STEP 1: FORMAT ────────────────────────────────────────────────────────────
@@ -60,14 +60,26 @@ Write-OK "Dashboard URL: $dashboard_url"
 # ── STEP 5: SET GEMINI KEY ────────────────────────────────────────────────────
 Write-Step 5 5 "Setting AI API key..."
 if ($GEMINI_API_KEY -ne "") {
-    # Pass via env var to avoid PowerShell/Python string escaping issues
+    # Write Python to a temp file to avoid all PowerShell/Python string escaping issues
     $env:_SA_GEMINI_KEY = $GEMINI_API_KEY
-    py -3 -c "import boto3,json,os; sm=boto3.client('secretsmanager'); sm.put_secret_value(SecretId='security-automation/ai-api-key', SecretString=json.dumps({'api_key':os.environ['_SA_GEMINI_KEY'],'provider':'gemini'})); print('Gemini key saved.')"
-    if ($LASTEXITCODE -ne 0) { Write-Info "Gemini key step had warnings — continuing" }
-    else { Write-OK "Gemini API key set" }
+    $tmpPy = "$env:TEMP\sa_gemini.py"
+    $pyContent = @'
+import boto3, json, os
+sm = boto3.client("secretsmanager")
+sm.put_secret_value(
+    SecretId="security-automation/ai-api-key",
+    SecretString=json.dumps({"api_key": os.environ["_SA_GEMINI_KEY"], "provider": "gemini"})
+)
+print("Gemini key saved.")
+'@
+    $pyContent | Set-Content -Path $tmpPy -Encoding UTF8
+    py -3 $tmpPy
+    Remove-Item $tmpPy -ErrorAction SilentlyContinue
+    if ($LASTEXITCODE -eq 0) { Write-OK "Gemini API key set" }
+    else { Write-Info "Gemini key step had warnings - continuing" }
     $env:_SA_GEMINI_KEY = ""
 } else {
-    Write-Info "No Gemini key in config.ps1 — AI uses smart fallback routing (still works)"
+    Write-Info "No Gemini key in config.ps1 - AI uses smart fallback routing (still works)"
 }
 
 # ── DONE ──────────────────────────────────────────────────────────────────────
@@ -81,7 +93,7 @@ Write-Host ""
 Write-Host "  Checklist:" -ForegroundColor White
 Write-Host "    1. Check $ADMIN_EMAIL -> click 'Confirm subscription'" -ForegroundColor Gray
 Write-Host "    2. Open dashboard URL above" -ForegroundColor Gray
-Write-Host "    3. Pipeline is DISABLED by default — click 'Start Pipeline' for real mode" -ForegroundColor Gray
+Write-Host "    3. Pipeline is DISABLED by default - click 'Start Pipeline' for real mode" -ForegroundColor Gray
 Write-Host "    4. Use Simulation Lab to demo (Category A=auto-fix, B=admin approval)" -ForegroundColor Gray
 Write-Host ""
 
