@@ -16,7 +16,6 @@ resource "aws_lambda_function" "approval" {
 
   environment {
     variables = {
-      AWS_REGION     = var.aws_region
       LOG_GROUP_NAME = var.log_group_name
     }
   }

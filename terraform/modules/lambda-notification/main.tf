@@ -16,7 +16,6 @@ resource "aws_lambda_function" "notification" {
 
   environment {
     variables = {
-      AWS_REGION           = var.aws_region
       SNS_TOPIC_ARN        = var.sns_topic_arn
       API_GATEWAY_BASE_URL = var.api_gateway_base_url
       LOG_GROUP_NAME       = var.log_group_name

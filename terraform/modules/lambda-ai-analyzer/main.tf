@@ -47,7 +47,6 @@ resource "aws_lambda_function" "ai_analyzer" {
 
   environment {
     variables = {
-      AWS_REGION     = var.aws_region
       AI_PROVIDER    = var.ai_provider
       AI_MODEL       = var.ai_model
       SECRET_NAME    = aws_secretsmanager_secret.ai_api_key.name

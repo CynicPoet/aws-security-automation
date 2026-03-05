@@ -6,7 +6,6 @@ data "archive_file" "remediation" {
 
 locals {
   common_env = {
-    AWS_REGION     = var.aws_region
     LOG_GROUP_NAME = var.log_group_name
     LOG_LEVEL      = "INFO"
   }
