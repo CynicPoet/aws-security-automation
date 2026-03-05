@@ -1,109 +1,180 @@
 # Security Automation — Knowledge Base
 
-## Stage 0 — Repository & Local Setup — COMPLETED ✅
-**Date:** 2026-03-05 | **Git hash:** 655d078
-- Root Terraform files, all 12 module stubs, .gitignore, GitHub Actions CI
+## CONTINUATION GUIDE (read this first on new chat)
+1. Prompt: `c:\Storage\Projects\Cloud_automation\Project_prompt.txt`
+2. Repo: `c:\Storage\Projects\Cloud_automation\aws-security-automation\`
+3. GitHub: `https://github.com/CynicPoet/aws-security-automation`
+4. Run `terraform validate` in `terraform/` first — must say "Success"
+5. VS Code errors = Terraform LS cache issue, not real. Fix: Ctrl+Shift+P → Terraform: Restart Language Server
+6. NO Lambda Layers needed — all Python uses stdlib + boto3 only (Gemini/Claude via urllib.request)
+7. Archive provider: hashicorp/archive ~> 2.4 (already in providers.tf)
+
+## Current Stage: Stage 5 — SNS + API Gateway (NEXT TO BUILD)
 
 ---
 
-## Stage 1 — IAM Roles & Budget Alert — COMPLETED ✅
-**Date:** 2026-03-05 | **Git hash:** dc1a945
-- 7 least-privilege IAM roles (remediation, verification, AI, notification, approval, step functions, eventbridge)
-- Monthly budget: 80% actual + 100% forecasted alerts
+## Stage Summary
+
+| Stage | Name | Status | Git Hash |
+|-------|------|--------|----------|
+| 0 | Scaffold | ✅ | 655d078 |
+| 1 | IAM + Budget | ✅ | dc1a945 |
+| 2 | Security Hub + Config | ✅ | e84f697 |
+| 3 | CloudWatch | ✅ | c7d498f |
+| 4 | Lambda (7 functions) | ✅ | adedb14 |
+| 5 | SNS + API Gateway | 🔲 NEXT | — |
+| 6 | Step Functions | 🔲 | — |
+| 7 | EventBridge | 🔲 | — |
+| 8 | Simulation Module | 🔲 | — |
+| 9 | MTTR Docs | 🔲 | — |
+| 10 | Scripts + Polish | 🔲 | — |
 
 ---
 
-## Stage 2 — Security Hub + AWS Config — COMPLETED ✅
-**Date:** 2026-03-05 | **Git hash:** e84f697
-- Security Hub: CIS v1.4 + FSBP v1.0 standards
-- Config: recorder (all resources), delivery → S3 bucket (AES256, access blocked)
-- Config IAM role: AWS_ConfigRole managed + inline S3
+## Module Map (all wired in terraform/main.tf)
+
+| Module Call | Directory | Key Outputs |
+|------------|-----------|-------------|
+| module.iam | ./modules/iam | 7 role ARNs ✅ |
+| module.budget | ./modules/budget | (no outputs) ✅ |
+| module.security_hub | ./modules/security-hub | (no outputs) ✅ |
+| module.cloudwatch | ./modules/cloudwatch | log_group_name ✅ |
+| module.sns | ./modules/sns | admin_alerts_topic_arn (stub "") |
+| module.lambda_remediation | ./modules/lambda-remediation | s3/iam/vpc/verification ARNs ✅ |
+| module.lambda_ai_analyzer | ./modules/lambda-ai-analyzer | function_arn ✅ |
+| module.lambda_notification | ./modules/lambda-notification | function_arn ✅ |
+| module.lambda_approval | ./modules/lambda-approval | function_arn, function_name ✅ |
+| module.api_gateway | ./modules/api-gateway | base_url (stub "") |
+| module.step_functions | ./modules/step-functions | state_machine_arn (stub "") |
+| module.eventbridge | ./modules/eventbridge | (no outputs) |
 
 ---
 
-## Stage 3 — CloudWatch — COMPLETED ✅
-**Date:** 2026-03-05 | **Git hash:** c7d498f
-- Log group: `/aws/security-automation` (90-day retention)
-- Dashboard: `SecurityAutomation-LiveMonitor` (5 rows: SF executions, Lambda errors, duration, SH findings, log insights)
-- Alarms: step-functions-failed (>=1), lambda-errors (>=3 aggregate)
+## Naming Conventions (EXACT — do not change)
+
+| Resource | Name |
+|----------|------|
+| State Machine | SecurityRemediationStateMachine |
+| EventBridge Rule | securityhub-finding-rule |
+| Lambda S3 fix | security-auto-s3-remediation |
+| Lambda IAM fix | security-auto-iam-remediation |
+| Lambda VPC fix | security-auto-vpc-remediation |
+| Lambda AI | security-auto-ai-analyzer |
+| Lambda Notify | security-auto-notification |
+| Lambda Approval | security-auto-approval-handler |
+| Lambda Verify | security-auto-verification |
+| SNS Topic | security-automation-admin-alerts |
+| API Gateway | SecurityAutomationApprovalAPI |
+| CW Log Group | /aws/security-automation |
+| CW Dashboard | SecurityAutomation-LiveMonitor |
+| Secrets Manager | security-automation/ai-api-key |
+| IAM roles | SecurityAutomation-{StepFunctionsRole,LambdaRemediationRole,LambdaAIAnalyzerRole,LambdaApprovalRole,LambdaNotificationRole,LambdaVerificationRole,EventBridgeRole} |
 
 ---
 
-## Stage 4 — Lambda Functions (7 total) — COMPLETED ✅
-**Date:** 2026-03-05
-**Files changed:**
-- `terraform/providers.tf` — added hashicorp/archive ~> 2.4
-- `terraform/modules/lambda-remediation/main.tf` — 4 Lambda functions + CW log groups
-- `terraform/modules/lambda-remediation/outputs.tf` — real ARN outputs
-- `terraform/modules/lambda-remediation/src/utils.py` — StructuredLogger, update_finding_workflow, ARN parsers
-- `terraform/modules/lambda-remediation/src/s3_remediation.py`
-- `terraform/modules/lambda-remediation/src/iam_remediation.py`
-- `terraform/modules/lambda-remediation/src/vpc_remediation.py`
-- `terraform/modules/lambda-remediation/src/verification.py`
-- `terraform/modules/lambda-ai-analyzer/main.tf` — AI Lambda + Secrets Manager secret
-- `terraform/modules/lambda-ai-analyzer/outputs.tf` — real ARN output
-- `terraform/modules/lambda-ai-analyzer/src/ai_analyzer.py`
-- `terraform/modules/lambda-ai-analyzer/src/infrastructure_context.py`
-- `terraform/modules/lambda-ai-analyzer/src/response_validator.py`
-- `terraform/modules/lambda-ai-analyzer/src/providers/__init__.py`
-- `terraform/modules/lambda-ai-analyzer/src/providers/base_provider.py`
-- `terraform/modules/lambda-ai-analyzer/src/providers/gemini_provider.py`
-- `terraform/modules/lambda-ai-analyzer/src/providers/claude_provider.py`
-- `terraform/modules/lambda-ai-analyzer/src/requirements.txt`
-- `terraform/modules/lambda-notification/main.tf`
-- `terraform/modules/lambda-notification/outputs.tf`
-- `terraform/modules/lambda-notification/src/send_notification.py`
-- `terraform/modules/lambda-approval/main.tf`
-- `terraform/modules/lambda-approval/outputs.tf`
-- `terraform/modules/lambda-approval/src/approval_handler.py`
+## Stage 4 Key Design Decisions (Lambda)
 
-**Lambda Functions:**
-| Name | Handler | Timeout | Purpose |
-|------|---------|---------|---------|
-| security-auto-s3-remediation | s3_remediation.lambda_handler | 60s | Block S3 public access |
-| security-auto-iam-remediation | iam_remediation.lambda_handler | 60s | Deactivate IAM keys + deny policy |
-| security-auto-vpc-remediation | vpc_remediation.lambda_handler | 60s | Revoke 0.0.0.0/0 SG rules |
-| security-auto-verification | verification.lambda_handler | 60s | Post-remediation check |
-| security-auto-ai-analyzer | ai_analyzer.lambda_handler | 60s | Gemini/Claude analysis |
-| security-auto-notification | send_notification.lambda_handler | 30s | SNS admin email |
-| security-auto-approval-handler | approval_handler.lambda_handler | 10s | API GW callback → Step Functions |
+- Python source only: stdlib + boto3, NO external packages, NO Lambda Layers
+- Gemini called via `urllib.request` REST POST to `generativelanguage.googleapis.com`
+- Claude called via `urllib.request` REST POST to `api.anthropic.com`
+- Secrets Manager: `security-automation/ai-api-key` — value = `{"api_key":"KEY","provider":"gemini"}`
+  - `ignore_changes = [secret_string]` so Terraform won't overwrite user-set key
+- Safety overrides in `response_validator.py` (AI CANNOT bypass):
+  - AutoRemediationExclude=true → never auto-remediate
+  - Environment=Production → always escalate
+  - default SG → never modify
+  - ServiceAccount=true / Role=CI-Pipeline → always escalate
+- All playbooks: VALIDATE → SAFETY CHECK → LOG → EXECUTE → VERIFY → LOG (idempotent)
+- Approval handler: GET /approve?token=TOKEN&action=N, /reject?token=TOKEN, /manual?token=TOKEN
+- Task token URL-encoded into approval links by send_notification.py
 
-**Key Design Decisions:**
-- NO external Python packages — all HTTP to Gemini/Claude via stdlib `urllib.request`
-  → no Lambda Layers, no pip install at deploy time, just `archive_file` data sources
-- AI provider is swappable with 2 variable changes (ai_provider + ai_model in tfvars)
-- Secrets Manager secret `security-automation/ai-api-key` created with placeholder value
-  → after first `terraform apply`, update manually (see post-deploy step below)
-- Hardcoded safety overrides in response_validator.py that AI CANNOT bypass:
-  - AutoRemediationExclude=true tag → never auto-remediate
-  - Environment=Production tag → always escalate to admin
-  - Default VPC security group → never modify
-  - ServiceAccount=true or Role=CI-Pipeline → always escalate
-- Each remediation playbook: VALIDATE → SAFETY CHECK → LOG → EXECUTE → VERIFY → LOG
-- All playbooks are idempotent (safe to run multiple times)
+---
 
-**CRITICAL POST-DEPLOY STEP (after Stage apply):**
-Update the AI API key in Secrets Manager:
+## Stage 5 — What to Build
+
+### SNS Module (`terraform/modules/sns/main.tf`)
+- `aws_sns_topic` named `security-automation-admin-alerts`
+- `aws_sns_topic_subscription` — email protocol, endpoint = var.admin_email
+- Output: `admin_alerts_topic_arn`
+
+### API Gateway Module (`terraform/modules/api-gateway/main.tf`)
+- REST API named `SecurityAutomationApprovalAPI`
+- Resources: `/approve` GET, `/reject` GET, `/manual` GET
+- Integration: Lambda proxy to `security-auto-approval-handler`
+- Stage: `prod`
+- Lambda permission: allow API GW to invoke the approval Lambda
+- Output: `base_url` = `https://{id}.execute-api.us-east-1.amazonaws.com/prod`
+
+---
+
+## Stage 6 — What to Build (Step Functions)
+
+### State Machine ASL (`terraform/modules/step-functions/state-machine.asl.json`)
+Flow:
+1. ParseFinding → LogFindingReceived
+2. AIAnalysis (Lambda: ai-analyzer)
+3. Choice: is_false_positive? → SuppressFinding → END
+4. Choice: safe_to_auto_remediate?
+   - YES → DetermineResourceType → Choice(S3/IAM/VPC) → Remediate* → VerifyRemediation → UpdateSecurityHub → END
+   - NO → NotifyAdmin → WaitForApproval (heartbeat callback, 1hr timeout)
+     - APPROVED → ExecuteApprovedPlaybook → VerifyRemediation → UpdateSecurityHub → END
+     - REJECTED → SuppressFinding → END
+     - TIMEOUT → LogTimeout → NotifyAdminTimeout → END
+5. Catch all errors → HandleError → END
+
+### Step Functions Terraform (`terraform/modules/step-functions/main.tf`)
+- `aws_sfn_state_machine` named `SecurityRemediationStateMachine`
+- Type: STANDARD
+- CW logging enabled (ALL level)
+- Definition from `templatefile("state-machine.asl.json", {...lambda ARNs...})`
+
+---
+
+## Stage 7 — EventBridge Rule
+
+File: `terraform/modules/eventbridge/main.tf`
+- Rule: `securityhub-finding-rule`
+- Event pattern:
+```json
+{
+  "source": ["aws.securityhub"],
+  "detail-type": ["Security Hub Findings - Imported"],
+  "detail": {
+    "findings": {
+      "Compliance": {"Status": ["FAILED"]},
+      "Workflow": {"Status": ["NEW"]},
+      "Severity": {"Label": ["MEDIUM", "HIGH", "CRITICAL"]},
+      "RecordState": ["ACTIVE"]
+    }
+  }
+}
+```
+- Target: Step Functions state machine ARN
+- Role: EventBridge IAM role
+
+---
+
+## Stage 8 — Simulation Module
+
+File: `terraform/simulation/main.tf`
+Resources (all tagged Environment=Test for Category A):
+- A1: S3 bucket with public-read ACL (`secauto-test-public-{random4}`)
+- A2: SG with SSH port 22 open to 0.0.0.0/0 (`secauto-test-open-ssh`)
+- A3: SG with ALL traffic from 0.0.0.0/0 (`secauto-test-open-all`)
+- B1: IAM user + active key + AdministratorAccess (`secauto-test-risky-user`, tagged Role=CI-Pipeline)
+- B2: SG with RDP 3389 open, tagged Environment=Production (`secauto-test-open-rdp`)
+- FP: S3 bucket with public-read ACL BUT tagged PublicAccess=Intentional,Purpose=StaticWebsite (`secauto-test-fp-website-{random4}`)
+
+---
+
+## CRITICAL POST-DEPLOY STEPS (after first terraform apply)
+
+1. **Confirm SNS subscription**: Check email and click "Confirm subscription" link
+2. **Set AI API key**:
 ```powershell
 aws secretsmanager put-secret-value `
   --secret-id security-automation/ai-api-key `
   --secret-string '{"api_key":"YOUR_GEMINI_KEY_HERE","provider":"gemini"}'
 ```
+3. **Verify**: Run `terraform plan` → should show 0 changes
 
-**Validation:** `terraform init -upgrade` ✅ | `terraform validate` ✅
-
----
-
-## Stage 5 — SNS + API Gateway — NEXT
-
----
-
-## CONTINUATION GUIDE (if chat resets)
-1. Read `Project_prompt.txt` at `c:\Storage\Projects\Cloud_automation\Project_prompt.txt`
-2. Working dir: `c:\Storage\Projects\Cloud_automation\aws-security-automation\`
-3. GitHub repo: `https://github.com/CynicPoet/aws-security-automation`
-4. Current stage: Starting **Stage 5 — SNS + API Gateway**
-5. Run `terraform validate` in `terraform/` — must say "Success"
-6. VS Code "No declaration found" errors = Terraform LS cache, not real errors
-7. Archive provider is now included (hashicorp/archive ~> 2.4)
-8. No Lambda Layers needed — all Python code uses stdlib + boto3 only
