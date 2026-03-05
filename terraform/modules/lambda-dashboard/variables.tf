@@ -22,3 +22,27 @@ variable "log_group_name" {
   description = "CloudWatch log group name"
   type        = string
 }
+
+variable "state_machine_arn" {
+  description = "Step Functions state machine ARN (for simulation)"
+  type        = string
+  default     = ""
+}
+
+variable "eventbridge_rule_name" {
+  description = "EventBridge rule name (for pipeline shutdown/start)"
+  type        = string
+  default     = "securityhub-finding-rule"
+}
+
+variable "sns_topic_arn" {
+  description = "SNS topic ARN (for email resend)"
+  type        = string
+  default     = ""
+}
+
+variable "account_id" {
+  description = "AWS account ID (for simulation resource ARNs)"
+  type        = string
+  default     = ""
+}

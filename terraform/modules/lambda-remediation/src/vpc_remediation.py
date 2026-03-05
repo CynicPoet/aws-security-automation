@@ -23,9 +23,10 @@ Input event:
 import os
 import boto3
 from botocore.exceptions import ClientError
-from utils import StructuredLogger, update_finding_workflow, extract_sg_id, get_finding_fields
+from utils import StructuredLogger, update_finding_workflow, extract_sg_id, get_finding_fields, write_finding_status
 
-REGION = os.environ.get("AWS_REGION", "us-east-1")
+REGION         = os.environ.get("AWS_REGION", "us-east-1")
+FINDINGS_TABLE = os.environ.get("FINDINGS_TABLE", "")
 OPEN_CIDRS = {"0.0.0.0/0", "::/0"}
 
 ec2 = boto3.client("ec2", region_name=REGION)
@@ -45,6 +46,9 @@ def lambda_handler(event: dict, context) -> dict:
         resource_id=sg_id,
         severity=finding["severity"],
     )
+
+    # Write to DynamoDB so auto-remediated findings appear in dashboard
+    write_finding_status(FINDINGS_TABLE, finding, event.get("ai_analysis", {}), "AUTO_REMEDIATED")
 
     # ── 1. VALIDATE ──────────────────────────────────────────────────────────
     try:

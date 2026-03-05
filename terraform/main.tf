@@ -1,3 +1,11 @@
+data "aws_caller_identity" "current" {}
+
+# Pre-compute ARNs to avoid circular module dependencies
+locals {
+  state_machine_arn = "arn:aws:states:${var.aws_region}:${data.aws_caller_identity.current.account_id}:stateMachine:SecurityRemediationStateMachine"
+  sns_topic_arn     = "arn:aws:sns:${var.aws_region}:${data.aws_caller_identity.current.account_id}:security-automation-admin-alerts"
+}
+
 module "iam" {
   source       = "./modules/iam"
   project_name = var.project_name
@@ -89,6 +97,10 @@ module "lambda_dashboard" {
   findings_table_name       = module.dynamodb.findings_table_name
   settings_table_name       = module.dynamodb.settings_table_name
   log_group_name            = module.cloudwatch.log_group_name
+  state_machine_arn         = local.state_machine_arn
+  eventbridge_rule_name     = "securityhub-finding-rule"
+  sns_topic_arn             = local.sns_topic_arn
+  account_id                = data.aws_caller_identity.current.account_id
 
   depends_on = [module.iam, module.dynamodb, module.cloudwatch]
 }

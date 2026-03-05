@@ -16,9 +16,13 @@ resource "aws_lambda_function" "dashboard" {
 
   environment {
     variables = {
-      FINDINGS_TABLE = var.findings_table_name
-      SETTINGS_TABLE = var.settings_table_name
-      LOG_GROUP_NAME = var.log_group_name
+      FINDINGS_TABLE    = var.findings_table_name
+      SETTINGS_TABLE    = var.settings_table_name
+      LOG_GROUP_NAME    = var.log_group_name
+      STATE_MACHINE_ARN = var.state_machine_arn
+      EB_RULE_NAME      = var.eventbridge_rule_name
+      SNS_TOPIC_ARN     = var.sns_topic_arn
+      ACCOUNT_ID        = var.account_id
     }
   }
 

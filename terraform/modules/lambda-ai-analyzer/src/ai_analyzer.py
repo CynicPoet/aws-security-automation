@@ -53,43 +53,23 @@ SECRET_NAME = os.environ.get("SECRET_NAME", "security-automation/ai-api-key")
 # Approved playbooks that the AI is allowed to recommend
 APPROVED_PLAYBOOKS = ["s3_remediation", "iam_remediation", "vpc_remediation", "manual"]
 
-SYSTEM_PROMPT_TEMPLATE = """You are a cloud security analyst for an AWS environment.
+SYSTEM_PROMPT_TEMPLATE = """AWS security analyst. Analyze finding and return JSON only.
 
-INFRASTRUCTURE CONTEXT:
-{infrastructure_context}
+CONTEXT:{infrastructure_context}
 
-FINDING TO ANALYZE:
-{finding_details}
+FINDING:{finding_details}
 
-SAFETY RULES (YOU CANNOT OVERRIDE THESE):
-1. Resources tagged AutoRemediationExclude=true → NEVER recommend modification
-2. Resources tagged Environment=Production → ALWAYS set safe_to_auto_remediate=false
-3. Default VPC security groups (is_default_sg=true) → NEVER recommend modification
-4. IAM users tagged ServiceAccount=true or Role=CI-Pipeline → ALWAYS set safe_to_auto_remediate=false
-5. S3 buckets with website_hosting_enabled=true AND intentional_public_tag=true → set is_false_positive=true
-6. ONLY recommend actions from this approved playbook list: {approved_playbooks}
-7. Never recommend deleting resources
-8. All recommended actions must be reversible
+RULES(non-negotiable):
+1. tag AutoRemediationExclude=true → safe_to_auto_remediate=false
+2. tag Environment=Production → safe_to_auto_remediate=false
+3. is_default_sg=true → safe_to_auto_remediate=false
+4. tag ServiceAccount=true OR Role=CI-Pipeline → safe_to_auto_remediate=false
+5. S3 website_hosting_enabled=true AND intentional_public_tag=true → is_false_positive=true
+6. playbook must be one of: {approved_playbooks}
+7. No deletions. All actions reversible.
 
-RESPOND IN THIS EXACT JSON FORMAT (no markdown, no extra text, no code fences):
-{{
-  "risk_level": "HIGH" | "MEDIUM" | "LOW",
-  "is_false_positive": true | false,
-  "false_positive_reason": "reason string" | null,
-  "analysis": "1-3 sentence human-readable analysis of this finding and its risk",
-  "safe_to_auto_remediate": true | false,
-  "escalation_reason": "reason if not safe to auto-remediate" | null,
-  "recommended_playbook": "s3_remediation" | "iam_remediation" | "vpc_remediation" | "manual" | "none",
-  "recommended_actions": [
-    {{
-      "action_id": 1,
-      "playbook": "playbook_name",
-      "description": "Plain English description of the action",
-      "risk": "LOW" | "MEDIUM" | "HIGH" | "NONE",
-      "reversible": true | false
-    }}
-  ]
-}}"""
+Return ONLY this JSON (no markdown, no fences):
+{{"risk_level":"HIGH"|"MEDIUM"|"LOW","is_false_positive":true|false,"false_positive_reason":"str"|null,"analysis":"1-2 sentences","safe_to_auto_remediate":true|false,"escalation_reason":"str"|null,"recommended_playbook":"s3_remediation"|"iam_remediation"|"vpc_remediation"|"manual"|"none","recommended_actions":[{{"action_id":1,"playbook":"name","description":"str","risk":"LOW"|"MEDIUM"|"HIGH","reversible":true|false}}]}}"""
 
 
 def lambda_handler(event: dict, context) -> dict:
@@ -133,15 +113,15 @@ def lambda_handler(event: dict, context) -> dict:
     }
 
     prompt = SYSTEM_PROMPT_TEMPLATE.format(
-        infrastructure_context=json.dumps(infra_context, indent=2, default=str),
-        finding_details=json.dumps(finding_details, indent=2),
-        approved_playbooks=", ".join(APPROVED_PLAYBOOKS),
+        infrastructure_context=json.dumps(_trim_context(infra_context), default=str),
+        finding_details=json.dumps(finding_details, default=str),
+        approved_playbooks=",".join(APPROVED_PLAYBOOKS),
     )
 
     # ── 4. CALL AI PROVIDER ───────────────────────────────────────────────────
     provider = get_provider(AI_PROVIDER, api_key, AI_MODEL)
     try:
-        raw_response = provider.analyze(prompt, max_tokens=1024)
+        raw_response = provider.analyze(prompt, max_tokens=600)
     except RuntimeError as exc:
         _log("ERROR", finding_id, resource_type, resource_id, severity,
              message=f"AI provider call failed: {exc}")
@@ -175,6 +155,27 @@ def lambda_handler(event: dict, context) -> dict:
 
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
+
+def _trim_context(ctx: dict) -> dict:
+    """
+    Reduce infrastructure context to only the fields the AI needs for safety rules.
+    Keeps tags (for safety checks) and key booleans. Drops verbose details.
+    """
+    trimmed = {
+        "resource_type": ctx.get("resource_type", ""),
+        "resource_id":   ctx.get("resource_id", ""),
+        "resource_tags": ctx.get("resource_tags", {}),
+    }
+    # Keep only the relevant sub-context (s3/iam/vpc)
+    for key in ("s3_context", "iam_context", "vpc_context"):
+        if key in ctx:
+            sub = ctx[key]
+            # Strip verbose keys not needed for safety rule evaluation
+            trimmed[key] = {k: v for k, v in sub.items()
+                            if k not in ("attached_eni_count", "attached_instance_count",
+                                         "has_cloudfront_origin", "last_used_service")}
+    return trimmed
+
 
 def _get_api_key() -> str:
     """Retrieve the AI API key from AWS Secrets Manager."""

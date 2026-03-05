@@ -37,9 +37,9 @@ variable "ai_provider" {
 }
 
 variable "ai_model" {
-  description = "AI model name to use"
+  description = "AI model name to use (primary; falls back to gemini-2.0-flash-lite, gemini-1.5-flash)"
   type        = string
-  default     = "gemini-2.5-flash"
+  default     = "gemini-2.0-flash"
 }
 
 variable "budget_limit_usd" {

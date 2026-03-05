@@ -9,6 +9,7 @@ Provides:
 
 import json
 import logging
+import os
 import time
 import boto3
 from datetime import datetime, timezone
@@ -133,6 +134,45 @@ def extract_sg_id(resource_id: str) -> str:
         if part.startswith("sg-"):
             return part
     return resource_id
+
+
+def write_finding_status(
+    table_name: str,
+    finding: dict,
+    ai_analysis: dict,
+    status: str,
+) -> None:
+    """
+    Write a finding record to the DynamoDB findings table (best-effort, non-fatal).
+    Used by remediation Lambdas to make auto-remediated findings visible in the dashboard.
+    """
+    if not table_name:
+        return
+    try:
+        region = os.environ.get("AWS_REGION", "us-east-1")
+        table  = boto3.resource("dynamodb", region_name=region).Table(table_name)
+        table.put_item(
+            Item={
+                "finding_id":          finding.get("finding_id", "unknown"),
+                "resource_type":       finding.get("resource_type", ""),
+                "resource_id":         finding.get("resource_id", ""),
+                "severity":            finding.get("severity", "MEDIUM"),
+                "title":               finding.get("title", finding.get("description", "")),
+                "description":         finding.get("description", ""),
+                "ai_analysis":         json.dumps(ai_analysis) if ai_analysis else "{}",
+                "recommended_actions": json.dumps(ai_analysis.get("recommended_actions", [])) if ai_analysis else "[]",
+                "risk_level":          (ai_analysis or {}).get("risk_level", "MEDIUM"),
+                "status":              status,
+                "created_at":          datetime.now(timezone.utc).isoformat(),
+                "updated_at":          datetime.now(timezone.utc).isoformat(),
+                "ttl_epoch":           int(time.time()) + 30 * 24 * 3600,
+                "environment":         finding.get("environment", ""),
+                "action_taken":        "",
+            },
+            ConditionExpression="attribute_not_exists(finding_id)",  # don't overwrite existing records
+        )
+    except Exception:
+        pass  # Non-fatal — dashboard visibility is best-effort
 
 
 def get_finding_fields(event: dict) -> dict:

@@ -105,6 +105,15 @@ data "aws_iam_policy_document" "lambda_remediation_policy" {
   }
 
   statement {
+    sid    = "DynamoDBWrite"
+    effect = "Allow"
+    actions = [
+      "dynamodb:PutItem",
+    ]
+    resources = ["arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/security-automation-*"]
+  }
+
+  statement {
     sid    = "CloudWatchLogs"
     effect = "Allow"
     actions = [
@@ -298,21 +307,67 @@ data "aws_iam_policy_document" "lambda_dashboard_policy" {
     sid    = "DynamoDBReadWrite"
     effect = "Allow"
     actions = [
-      "dynamodb:Scan",
-      "dynamodb:GetItem",
-      "dynamodb:PutItem",
-      "dynamodb:UpdateItem",
-      "dynamodb:Query",
+      "dynamodb:Scan", "dynamodb:GetItem", "dynamodb:PutItem",
+      "dynamodb:UpdateItem", "dynamodb:Query",
     ]
     resources = ["arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/security-automation-*"]
   }
 
   statement {
-    sid    = "StepFunctionsCallback"
+    sid    = "StepFunctions"
     effect = "Allow"
     actions = [
-      "states:SendTaskSuccess",
-      "states:SendTaskFailure",
+      "states:SendTaskSuccess", "states:SendTaskFailure", "states:StartExecution",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "EventBridgeControl"
+    effect = "Allow"
+    actions = [
+      "events:EnableRule", "events:DisableRule", "events:DescribeRule",
+    ]
+    resources = ["arn:aws:events:${var.aws_region}:${data.aws_caller_identity.current.account_id}:rule/securityhub-finding-rule"]
+  }
+
+  statement {
+    sid       = "SNSPublish"
+    effect    = "Allow"
+    actions   = ["sns:Publish"]
+    resources = ["arn:aws:sns:${var.aws_region}:${data.aws_caller_identity.current.account_id}:security-automation-admin-alerts"]
+  }
+
+  statement {
+    sid    = "SimulationEC2"
+    effect = "Allow"
+    actions = [
+      "ec2:CreateSecurityGroup", "ec2:DeleteSecurityGroup",
+      "ec2:AuthorizeSecurityGroupIngress", "ec2:RevokeSecurityGroupIngress",
+      "ec2:DescribeVpcs", "ec2:DescribeSecurityGroups", "ec2:CreateTags",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "SimulationS3"
+    effect = "Allow"
+    actions = [
+      "s3:CreateBucket", "s3:DeleteBucket", "s3:PutPublicAccessBlock",
+      "s3:GetPublicAccessBlock", "s3:ListBucket", "s3:DeleteObject",
+      "s3:ListObjectsV2", "s3:PutBucketAcl",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "SimulationIAM"
+    effect = "Allow"
+    actions = [
+      "iam:CreateUser", "iam:DeleteUser", "iam:TagUser",
+      "iam:CreateAccessKey", "iam:DeleteAccessKey", "iam:ListAccessKeys",
+      "iam:PutUserPolicy", "iam:DeleteUserPolicy", "iam:ListUserPolicies",
+      "iam:AttachUserPolicy", "iam:DetachUserPolicy", "iam:ListAttachedUserPolicies",
     ]
     resources = ["*"]
   }
@@ -321,9 +376,7 @@ data "aws_iam_policy_document" "lambda_dashboard_policy" {
     sid    = "CloudWatchLogs"
     effect = "Allow"
     actions = [
-      "logs:CreateLogGroup",
-      "logs:CreateLogStream",
-      "logs:PutLogEvents",
+      "logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents",
     ]
     resources = ["arn:aws:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:log-group:/aws/lambda/security-auto-dashboard:*"]
   }

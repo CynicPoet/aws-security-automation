@@ -8,10 +8,9 @@ locals {
   common_env = {
     LOG_GROUP_NAME = var.log_group_name
     LOG_LEVEL      = "INFO"
-  }
-  verify_env = merge(local.common_env, {
     FINDINGS_TABLE = var.findings_table_name
-  })
+  }
+  verify_env = local.common_env
 }
 
 # ── S3 REMEDIATION ────────────────────────────────────────────────────────────

@@ -24,9 +24,10 @@ import json
 import os
 import boto3
 from botocore.exceptions import ClientError
-from utils import StructuredLogger, update_finding_workflow, extract_iam_username, get_finding_fields
+from utils import StructuredLogger, update_finding_workflow, extract_iam_username, get_finding_fields, write_finding_status
 
-REGION = os.environ.get("AWS_REGION", "us-east-1")
+REGION         = os.environ.get("AWS_REGION", "us-east-1")
+FINDINGS_TABLE = os.environ.get("FINDINGS_TABLE", "")
 DENY_ALL_POLICY_NAME = "SecurityAutomation-EmergencyDenyAll"
 
 # Inline policy that denies all API actions — applied as a circuit-breaker
@@ -58,6 +59,9 @@ def lambda_handler(event: dict, context) -> dict:
         resource_id=username,
         severity=finding["severity"],
     )
+
+    # Write to DynamoDB so auto-remediated findings appear in dashboard
+    write_finding_status(FINDINGS_TABLE, finding, event.get("ai_analysis", {}), "AUTO_REMEDIATED")
 
     # ── 1. VALIDATE ──────────────────────────────────────────────────────────
     try:
