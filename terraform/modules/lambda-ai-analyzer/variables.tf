@@ -27,3 +27,8 @@ variable "ai_model" {
   description = "AI model name to use"
   type        = string
 }
+
+variable "settings_table_name" {
+  description = "DynamoDB settings table name (for auto_remediation toggle)"
+  type        = string
+}

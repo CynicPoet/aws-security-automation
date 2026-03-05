@@ -83,10 +83,17 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div class="flex items-center gap-3">
     <span class="text-xs text-slate-500" id="last-updated">Loading...</span>
     <!-- Pipeline status + control -->
-    <div class="flex items-center gap-2">
+    <div class="flex items-center gap-2" title="Controls real AWS Security Hub event processing via EventBridge. Simulation Lab always works regardless of this setting.">
       <span id="pipeline-dot" class="w-2 h-2 rounded-full bg-slate-500"></span>
       <span id="pipeline-label" class="text-xs text-slate-400">Pipeline</span>
       <button id="pipeline-btn" onclick="togglePipeline()" class="text-xs px-2 py-1 rounded glass border border-slate-600 hover:border-slate-400 transition-colors"></button>
+    </div>
+    <!-- Auto-Remediation toggle -->
+    <div class="flex items-center gap-2" title="When OFF: all findings require manual admin approval — ideal for demos">
+      <span class="text-xs text-slate-400">Auto-Fix</span>
+      <button id="auto-rem-toggle" onclick="toggleAutoRemediation()" class="relative w-10 h-5 rounded-full transition-colors bg-green-700" title="Toggle auto-remediation. OFF = all findings routed to admin approval.">
+        <span id="auto-rem-knob" class="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform translate-x-5"></span>
+      </button>
     </div>
     <!-- Email toggle -->
     <div class="flex items-center gap-2">
@@ -234,6 +241,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <div class="detail-cell">
             <div class="detail-label">Resource ARN / ID</div>
             <div class="detail-value truncate" id="modal-resource-id" title=""></div>
+            <a id="modal-console-link" href="#" target="_blank" rel="noopener" class="hidden text-xs text-indigo-400 hover:text-indigo-200 mt-1 inline-flex items-center gap-1">&#x1F517; Open in AWS Console</a>
           </div>
           <div class="detail-cell">
             <div class="detail-label">AWS Account ID</div>
@@ -326,6 +334,7 @@ let metaInfo = {account_id: '', region: ''};
 let currentTab = 'all';
 let currentFinding = null;
 let emailEnabled = false;
+let autoRemediationEnabled = true;
 let pipelineState = 'UNKNOWN';
 let activeSim = null;
 
@@ -496,24 +505,50 @@ async function loadSettings() {
   try {
     const res = await fetch(API_BASE+'/dashboard/api/settings');
     const data = await res.json();
-    emailEnabled = data.value==='true'; updateToggleUI();
+    emailEnabled = data.email_notifications==='true';
+    autoRemediationEnabled = data.auto_remediation!=='false';
+    updateEmailUI(); updateAutoRemUI();
   } catch(e){}
 }
 
-function updateToggleUI() {
+function updateEmailUI() {
   const btn=document.getElementById('email-toggle'), knob=document.getElementById('toggle-knob');
   if(emailEnabled){ btn.style.background='#4f46e5'; knob.style.transform='translateX(20px)'; }
   else{ btn.style.background='#374151'; knob.style.transform='translateX(0)'; }
 }
 
+function updateAutoRemUI() {
+  const btn=document.getElementById('auto-rem-toggle'), knob=document.getElementById('auto-rem-knob');
+  if(autoRemediationEnabled){ btn.style.background='#15803d'; knob.style.transform='translateX(20px)'; }
+  else{ btn.style.background='#7f1d1d'; knob.style.transform='translateX(0)'; }
+}
+
 async function toggleEmail() {
-  emailEnabled=!emailEnabled; updateToggleUI();
+  emailEnabled=!emailEnabled; updateEmailUI();
   try {
     await fetch(API_BASE+'/dashboard/api/settings',{
       method:'PUT', headers:{'Content-Type':'application/json'},
       body:JSON.stringify({email_notifications:emailEnabled}),
     });
-  } catch(e){ emailEnabled=!emailEnabled; updateToggleUI(); }
+  } catch(e){ emailEnabled=!emailEnabled; updateEmailUI(); }
+}
+
+async function toggleAutoRemediation() {
+  const next = !autoRemediationEnabled;
+  const msg = next
+    ? 'Enable auto-remediation? Category A findings will be fixed automatically.'
+    : 'Disable auto-remediation? ALL findings will require manual admin approval — useful for demos.';
+  if(!confirm(msg)) return;
+  autoRemediationEnabled = next; updateAutoRemUI();
+  try {
+    const res = await fetch(API_BASE+'/dashboard/api/settings',{
+      method:'PUT', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({auto_remediation:autoRemediationEnabled}),
+    });
+    if(res.ok){
+      showToast(autoRemediationEnabled ? 'Auto-remediation enabled' : 'Auto-remediation disabled — all findings will route to approval', 'success');
+    } else { autoRemediationEnabled=!autoRemediationEnabled; updateAutoRemUI(); }
+  } catch(e){ autoRemediationEnabled=!autoRemediationEnabled; updateAutoRemUI(); }
 }
 
 // ── PIPELINE ───────────────────────────────────────────────────────────────────
@@ -662,6 +697,29 @@ function setTab(tab) {
 }
 
 // ── MODAL ──────────────────────────────────────────────────────────────────────
+function getConsoleUrl(resourceType, resourceId, region) {
+  if(!resourceId) return null;
+  const r = region || 'us-east-1';
+  const base = `https://${r}.console.aws.amazon.com`;
+  const t = (resourceType||'').toLowerCase();
+  // S3: arn:aws:s3:::bucket-name
+  if(t.includes('s3bucket')) {
+    const bucket = resourceId.replace(/^arn:aws:s3:::/, '').split('/')[0];
+    return `https://s3.console.aws.amazon.com/s3/buckets/${bucket}?region=${r}`;
+  }
+  // EC2 Security Group: arn:aws:ec2:region:account:security-group/sg-xxxxx
+  if(t.includes('securitygroup')) {
+    const sgId = resourceId.split('/').pop();
+    return `${base}/ec2/v2/home?region=${r}#SecurityGroups:group-id=${sgId}`;
+  }
+  // IAM User: arn:aws:iam::account:user/username
+  if(t.includes('iamuser') || t.includes('iam')) {
+    const username = resourceId.split('/').pop();
+    return `https://us-east-1.console.aws.amazon.com/iam/home?region=${r}#/users/details/${username}`;
+  }
+  return null;
+}
+
 function parseArn(arn) {
   if(!arn || !arn.startsWith('arn:')) return {service:'',region:'',account:'',resource:''};
   const p = arn.split(':');
@@ -698,6 +756,13 @@ function openModal(findingId) {
   const ridEl = document.getElementById('modal-resource-id');
   ridEl.textContent = f.resource_id||'—';
   ridEl.title = f.resource_id||'';
+
+  // AWS Console deep-link
+  const consoleRegion = arn.region || metaInfo.region || 'us-east-1';
+  const consoleUrl = getConsoleUrl(f.resource_type, f.resource_id, consoleRegion);
+  const linkEl = document.getElementById('modal-console-link');
+  if(consoleUrl){ linkEl.href=consoleUrl; linkEl.classList.remove('hidden'); }
+  else { linkEl.classList.add('hidden'); }
 
   // Account ID: try ARN, else fall back to metaInfo
   document.getElementById('modal-account-id').textContent = arn.account || metaInfo.account_id || '—';

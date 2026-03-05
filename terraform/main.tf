@@ -56,15 +56,16 @@ module "lambda_remediation" {
 }
 
 module "lambda_ai_analyzer" {
-  source             = "./modules/lambda-ai-analyzer"
-  project_name       = var.project_name
-  aws_region         = var.aws_region
-  lambda_ai_role_arn = module.iam.lambda_ai_analyzer_role_arn
-  log_group_name     = module.cloudwatch.log_group_name
-  ai_provider        = var.ai_provider
-  ai_model           = var.ai_model
+  source              = "./modules/lambda-ai-analyzer"
+  project_name        = var.project_name
+  aws_region          = var.aws_region
+  lambda_ai_role_arn  = module.iam.lambda_ai_analyzer_role_arn
+  log_group_name      = module.cloudwatch.log_group_name
+  ai_provider         = var.ai_provider
+  ai_model            = var.ai_model
+  settings_table_name = module.dynamodb.settings_table_name
 
-  depends_on = [module.iam, module.cloudwatch]
+  depends_on = [module.iam, module.cloudwatch, module.dynamodb]
 }
 
 module "lambda_notification" {

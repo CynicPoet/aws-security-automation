@@ -49,6 +49,7 @@ REGION = os.environ.get("AWS_REGION", "us-east-1")
 AI_PROVIDER = os.environ.get("AI_PROVIDER", "gemini")
 AI_MODEL = os.environ.get("AI_MODEL", "gemini-2.5-flash")
 SECRET_NAME = os.environ.get("SECRET_NAME", "security-automation/ai-api-key")
+SETTINGS_TABLE = os.environ.get("SETTINGS_TABLE", "")
 
 # Approved playbooks that the AI is allowed to recommend
 APPROVED_PLAYBOOKS = ["s3_remediation", "iam_remediation", "vpc_remediation", "manual"]
@@ -139,6 +140,18 @@ def lambda_handler(event: dict, context) -> dict:
     analysis["provider_used"] = AI_PROVIDER
     analysis["model_used"] = AI_MODEL
 
+    # ── 6. CHECK AUTO-REMEDIATION TOGGLE ─────────────────────────────────────
+    # If the dashboard toggle is OFF, force all findings to manual approval.
+    if not _is_auto_remediation_enabled():
+        if analysis.get("safe_to_auto_remediate"):
+            analysis["safe_to_auto_remediate"] = False
+            analysis["escalation_reason"] = (
+                (analysis.get("escalation_reason") or "") +
+                " [Auto-remediation disabled via dashboard toggle]"
+            ).strip()
+            _log("AUTO_REM_DISABLED", finding_id, resource_type, resource_id, severity,
+                 message="Auto-remediation override: dashboard toggle is OFF — routing to admin approval")
+
     _log(
         "AI_ANALYSIS_COMPLETE", finding_id, resource_type, resource_id, severity,
         message=(
@@ -175,6 +188,26 @@ def _trim_context(ctx: dict) -> dict:
                             if k not in ("attached_eni_count", "attached_instance_count",
                                          "has_cloudfront_origin", "last_used_service")}
     return trimmed
+
+
+def _is_auto_remediation_enabled() -> bool:
+    """
+    Read the auto_remediation setting from DynamoDB settings table.
+    Returns True (auto-remediation ON) if: setting is missing, value='true', or DynamoDB is unreachable.
+    Returns False only when setting explicitly set to 'false'.
+    """
+    if not SETTINGS_TABLE:
+        return True  # no table configured → default ON
+    try:
+        db = boto3.resource("dynamodb", region_name=REGION)
+        table = db.Table(SETTINGS_TABLE)
+        result = table.get_item(Key={"setting_key": "auto_remediation"})
+        item = result.get("Item")
+        if item is None:
+            return True  # not set → default ON
+        return item.get("value", "true").lower() != "false"
+    except Exception:
+        return True  # fail-safe: if DynamoDB unreachable, don't block remediation
 
 
 def _get_api_key() -> str:
@@ -222,6 +255,10 @@ def _fallback_response(resource_type: str, error_reason: str, finding: dict = No
         if safe_to_auto
         else "AI unavailable — admin should review and decide"
     )
+
+    # Respect the dashboard auto-remediation toggle even in fallback path
+    if safe_to_auto and not _is_auto_remediation_enabled():
+        safe_to_auto = False
 
     return {
         "risk_level": "HIGH",

@@ -51,6 +51,7 @@ resource "aws_lambda_function" "ai_analyzer" {
       AI_MODEL       = var.ai_model
       SECRET_NAME    = aws_secretsmanager_secret.ai_api_key.name
       LOG_GROUP_NAME = var.log_group_name
+      SETTINGS_TABLE = var.settings_table_name
     }
   }
 

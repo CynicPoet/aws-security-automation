@@ -141,19 +141,35 @@ def clear_findings():
     return respond(200, {"status": "ok", "deleted": deleted})
 
 
+def _get_setting(key, default="false"):
+    result = settings_table.get_item(Key={"setting_key": key})
+    item = result.get("Item")
+    return item.get("value", default) if item else default
+
+
 def get_settings():
-    result = settings_table.get_item(Key={"setting_key": "email_notifications"})
-    item = result.get("Item", {"setting_key": "email_notifications", "value": "false"})
-    return respond(200, item)
+    email = _get_setting("email_notifications", "false")
+    auto_rem = _get_setting("auto_remediation", "true")
+    return respond(200, {
+        "email_notifications": email,
+        "auto_remediation": auto_rem,
+    })
 
 
 def update_settings(body_str):
     body = parse_body(body_str)
     if body is None:
         return respond(400, {"error": "Invalid JSON"})
-    value = "true" if body.get("email_notifications") else "false"
-    settings_table.put_item(Item={"setting_key": "email_notifications", "value": value, "updated_at": now_iso()})
-    return respond(200, {"setting_key": "email_notifications", "value": value})
+    updated = {}
+    if "email_notifications" in body:
+        val = "true" if body["email_notifications"] else "false"
+        settings_table.put_item(Item={"setting_key": "email_notifications", "value": val, "updated_at": now_iso()})
+        updated["email_notifications"] = val
+    if "auto_remediation" in body:
+        val = "true" if body["auto_remediation"] else "false"
+        settings_table.put_item(Item={"setting_key": "auto_remediation", "value": val, "updated_at": now_iso()})
+        updated["auto_remediation"] = val
+    return respond(200, {"status": "ok", "updated": updated})
 
 
 def take_action(body_str):
