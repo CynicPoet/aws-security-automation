@@ -400,7 +400,7 @@ data "aws_iam_policy_document" "lambda_dashboard_policy" {
       "sns:DeleteTopic", "sns:Unsubscribe", "sns:ListSubscriptionsByTopic",
       "events:RemoveTargets", "events:DeleteRule", "events:ListTargetsByRule",
       "logs:DescribeLogGroups", "logs:DeleteLogGroup", "logs:DeleteLogStream",
-      "secretsmanager:DeleteSecret",
+      "secretsmanager:DeleteSecret", "secretsmanager:PutSecretValue",
       "apigateway:GET", "apigateway:DELETE",
     ]
     resources = ["*"]

@@ -83,8 +83,11 @@ def lambda_handler(event: dict, context) -> dict:
     resource_id = finding.get("resource_id", finding.get("ResourceId", "unknown"))
     severity = finding.get("severity", "MEDIUM")
 
+    # ── 0. CHECK DYNAMODB FOR RUNTIME AI CONFIG OVERRIDES ────────────────────
+    active_provider, active_model = _get_ai_config_override()
+
     _log("AI_ANALYSIS_START", finding_id, resource_type, resource_id, severity,
-         message=f"AI analysis started using provider={AI_PROVIDER} model={AI_MODEL}")
+         message=f"AI analysis started using provider={active_provider} model={active_model}")
 
     # ── 1. GET API KEY FROM SECRETS MANAGER ──────────────────────────────────
     try:
@@ -120,7 +123,7 @@ def lambda_handler(event: dict, context) -> dict:
     )
 
     # ── 4. CALL AI PROVIDER ───────────────────────────────────────────────────
-    provider = get_provider(AI_PROVIDER, api_key, AI_MODEL)
+    provider = get_provider(active_provider, api_key, active_model)
     try:
         raw_response = provider.analyze(prompt, max_tokens=600)
     except RuntimeError as exc:
@@ -137,8 +140,8 @@ def lambda_handler(event: dict, context) -> dict:
         return _fallback_response(resource_type, f"Response validation failed: {exc}", finding)
 
     duration_ms = int(time.time() * 1000) - start_ms
-    analysis["provider_used"] = AI_PROVIDER
-    analysis["model_used"] = AI_MODEL
+    analysis["provider_used"] = active_provider
+    analysis["model_used"] = active_model
 
     # ── 6. CHECK AUTO-REMEDIATION TOGGLE ─────────────────────────────────────
     # If the dashboard toggle is OFF, force all findings to manual approval.
@@ -188,6 +191,26 @@ def _trim_context(ctx: dict) -> dict:
                             if k not in ("attached_eni_count", "attached_instance_count",
                                          "has_cloudfront_origin", "last_used_service")}
     return trimmed
+
+
+def _get_ai_config_override() -> tuple:
+    """
+    Read ai_provider and ai_model from DynamoDB settings table (hot-swap support).
+    Falls back to environment variables if DynamoDB is unreachable or keys not set.
+    Returns: (provider, model) tuple.
+    """
+    if not SETTINGS_TABLE:
+        return AI_PROVIDER, AI_MODEL
+    try:
+        db = boto3.resource("dynamodb", region_name=REGION)
+        table = db.Table(SETTINGS_TABLE)
+        provider_item = table.get_item(Key={"setting_key": "ai_provider"}).get("Item")
+        model_item    = table.get_item(Key={"setting_key": "ai_model"}).get("Item")
+        provider = provider_item.get("value", AI_PROVIDER) if provider_item else AI_PROVIDER
+        model    = model_item.get("value", AI_MODEL)    if model_item    else AI_MODEL
+        return provider, model
+    except Exception:
+        return AI_PROVIDER, AI_MODEL  # fail-safe: fall back to env vars
 
 
 def _is_auto_remediation_enabled() -> bool:
@@ -284,7 +307,7 @@ def _fallback_response(resource_type: str, error_reason: str, finding: dict = No
             }
         ],
         "safety_override_applied": False,
-        "provider_used": AI_PROVIDER,
+        "provider_used": AI_PROVIDER,  # env-var fallback (no DB override in fallback path)
         "model_used": AI_MODEL,
     }
 

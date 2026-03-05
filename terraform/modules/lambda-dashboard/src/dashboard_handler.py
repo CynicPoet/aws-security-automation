@@ -18,6 +18,8 @@ Routes:
 import json
 import os
 import time
+import urllib.request
+import urllib.error
 import boto3
 from datetime import datetime, timezone
 from botocore.exceptions import ClientError
@@ -29,6 +31,14 @@ EB_RULE_NAME      = os.environ.get("EB_RULE_NAME", "securityhub-finding-rule")
 SNS_TOPIC_ARN     = os.environ.get("SNS_TOPIC_ARN", "")
 ACCOUNT_ID        = os.environ.get("ACCOUNT_ID", "")
 REGION            = os.environ.get("AWS_REGION", "us-east-1")
+AI_SECRET_NAME    = "security-automation/ai-api-key"
+
+# Claude models available (hardcoded — no public listing endpoint without paid access)
+CLAUDE_MODELS = [
+    {"id": "claude-haiku-4-5-20251001",  "name": "Claude Haiku 4.5  (fastest, most cost-efficient)"},
+    {"id": "claude-sonnet-4-6",          "name": "Claude Sonnet 4.6 (balanced)"},
+    {"id": "claude-opus-4-6",            "name": "Claude Opus 4.6   (most capable, highest cost)"},
+]
 
 dynamodb = boto3.resource("dynamodb", region_name=REGION)
 sfn      = boto3.client("stepfunctions", region_name=REGION)
@@ -170,6 +180,153 @@ def update_settings(body_str):
         settings_table.put_item(Item={"setting_key": "auto_remediation", "value": val, "updated_at": now_iso()})
         updated["auto_remediation"] = val
     return respond(200, {"status": "ok", "updated": updated})
+
+
+def get_ai_config():
+    """Return current AI provider, model, and whether an API key is stored."""
+    provider = _get_setting("ai_provider", "gemini")
+    model    = _get_setting("ai_model", "gemini-2.0-flash")
+    # Check whether a non-placeholder key exists in Secrets Manager
+    has_key = False
+    try:
+        sm = boto3.client("secretsmanager", region_name=REGION)
+        resp = sm.get_secret_value(SecretId=AI_SECRET_NAME)
+        secret = json.loads(resp["SecretString"])
+        key_val = secret.get("api_key", "")
+        has_key = bool(key_val) and "REPLACE_WITH" not in key_val
+    except Exception:
+        pass
+    return respond(200, {"provider": provider, "model": model, "has_api_key": has_key})
+
+
+def update_ai_config(body_str):
+    """
+    Update AI provider/model in DynamoDB and optionally store new API key in Secrets Manager.
+    Body: { provider, model, api_key (optional) }
+    """
+    body = parse_body(body_str)
+    if body is None:
+        return respond(400, {"error": "Invalid JSON"})
+
+    updated = {}
+    if "provider" in body:
+        val = body["provider"].lower()
+        if val not in ("gemini", "claude"):
+            return respond(400, {"error": "provider must be 'gemini' or 'claude'"})
+        settings_table.put_item(Item={"setting_key": "ai_provider", "value": val, "updated_at": now_iso()})
+        updated["provider"] = val
+
+    if "model" in body:
+        settings_table.put_item(Item={"setting_key": "ai_model", "value": body["model"], "updated_at": now_iso()})
+        updated["model"] = body["model"]
+
+    if "api_key" in body and body["api_key"]:
+        provider = body.get("provider") or _get_setting("ai_provider", "gemini")
+        try:
+            sm = boto3.client("secretsmanager", region_name=REGION)
+            sm.put_secret_value(
+                SecretId=AI_SECRET_NAME,
+                SecretString=json.dumps({"api_key": body["api_key"], "provider": provider}),
+            )
+            updated["api_key"] = "stored"
+        except Exception as exc:
+            return respond(500, {"error": f"Failed to store API key: {exc}"})
+
+    return respond(200, {"status": "ok", "updated": updated})
+
+
+def fetch_ai_models(body_str):
+    """
+    Validate an API key against the chosen provider and return the list of usable models.
+    Body: { provider, api_key }
+    """
+    body = parse_body(body_str)
+    if body is None:
+        return respond(400, {"error": "Invalid JSON"})
+
+    provider = body.get("provider", "gemini").lower()
+    api_key  = body.get("api_key", "").strip()
+    if not api_key:
+        return respond(400, {"error": "api_key required"})
+
+    if provider == "gemini":
+        return _fetch_gemini_models(api_key)
+    elif provider == "claude":
+        return _validate_claude_key(api_key)
+    return respond(400, {"error": "provider must be 'gemini' or 'claude'"})
+
+
+def _fetch_gemini_models(api_key: str):
+    """Call Gemini models API, return models that support generateContent."""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}&pageSize=50"
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        err = exc.read().decode("utf-8")
+        if exc.code == 400 or exc.code == 403:
+            return respond(401, {"error": "Invalid Gemini API key"})
+        return respond(502, {"error": f"Gemini API error {exc.code}: {err[:200]}"})
+    except urllib.error.URLError as exc:
+        return respond(502, {"error": f"Network error: {exc.reason}"})
+
+    raw = data.get("models", [])
+    # Filter to models that support generateContent and are flash/pro variants
+    models = []
+    for m in raw:
+        name = m.get("name", "")  # e.g. "models/gemini-2.0-flash"
+        model_id = name.replace("models/", "")
+        supported = m.get("supportedGenerationMethods", [])
+        display   = m.get("displayName", model_id)
+        if "generateContent" not in supported:
+            continue
+        # Skip noisy embedding / vision-only / aqa models
+        skip_keywords = ["embedding", "aqa", "vision", "learnlm", "exp", "preview", "latest"]
+        if any(kw in model_id.lower() for kw in skip_keywords):
+            continue
+        models.append({"id": model_id, "name": display})
+
+    # Sort: flash models first, then others
+    models.sort(key=lambda x: (0 if "flash" in x["id"] else 1, x["id"]))
+    if not models:
+        return respond(200, {"valid": True, "models": [
+            {"id": "gemini-2.0-flash",      "name": "Gemini 2.0 Flash"},
+            {"id": "gemini-2.0-flash-lite",  "name": "Gemini 2.0 Flash Lite"},
+            {"id": "gemini-1.5-flash",       "name": "Gemini 1.5 Flash"},
+        ]})
+    return respond(200, {"valid": True, "models": models})
+
+
+def _validate_claude_key(api_key: str):
+    """Validate Claude API key by making a minimal test call."""
+    payload = json.dumps({
+        "model": "claude-haiku-4-5-20251001",
+        "max_tokens": 5,
+        "messages": [{"role": "user", "content": "Hi"}],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp.read()
+        return respond(200, {"valid": True, "models": CLAUDE_MODELS})
+    except urllib.error.HTTPError as exc:
+        err = exc.read().decode("utf-8")
+        if exc.code in (401, 403):
+            return respond(401, {"error": "Invalid Claude API key"})
+        # 400 with valid key means model accepted but bad request — key is valid
+        return respond(200, {"valid": True, "models": CLAUDE_MODELS})
+    except urllib.error.URLError as exc:
+        return respond(502, {"error": f"Network error: {exc.reason}"})
 
 
 def take_action(body_str):
@@ -686,5 +843,12 @@ def lambda_handler(event, context):
         return start_simulation(body)
     if method == "DELETE" and path.endswith("/api/simulate"):
         return cleanup_simulation(body)
+
+    if method == "GET" and path.endswith("/api/ai-config"):
+        return get_ai_config()
+    if method == "PUT" and path.endswith("/api/ai-config"):
+        return update_ai_config(body)
+    if method == "POST" and path.endswith("/api/ai-models"):
+        return fetch_ai_models(body)
 
     return respond(404, {"error": f"Unknown route: {method} {path}"})

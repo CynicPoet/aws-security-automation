@@ -102,6 +102,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <span id="toggle-knob" class="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform"></span>
       </button>
     </div>
+    <!-- AI Config button -->
+    <button onclick="openAIModal()" class="glass px-3 py-1.5 rounded-lg text-xs text-indigo-300 hover:text-indigo-100 border border-indigo-800 hover:border-indigo-600 transition-colors flex items-center gap-1" title="Configure AI provider and model">
+      &#x1F916; AI
+    </button>
     <button onclick="loadAll()" class="glass px-3 py-1.5 rounded-lg text-xs text-slate-300 hover:text-white border border-transparent hover:border-slate-500 transition-colors flex items-center gap-1">
       <span id="refresh-icon">&#8635;</span> Refresh
     </button>
@@ -929,6 +933,223 @@ function fmtTimeFull(iso){
 }
 function safeParse(v,fb){if(!v)return fb;if(typeof v==='object')return v;try{return JSON.parse(v)}catch{return fb}}
 function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+
+// ── AI CONFIG MODAL ────────────────────────────────────────────────────────────
+let aiConfig = { provider: 'gemini', model: 'gemini-2.0-flash', has_api_key: false };
+let aiModels = [];
+
+const PROVIDER_HINTS = {
+  gemini: 'Get a free key at aistudio.google.com \u2014 recommended: gemini-2.0-flash (15 req/min free)',
+  claude: 'Get a key at console.anthropic.com \u2014 recommended: haiku-4-5 (~8x cheaper than Sonnet)',
+};
+
+async function openAIModal() {
+  document.getElementById('ai-modal').classList.remove('hidden');
+  document.getElementById('ai-validate-status').textContent = '';
+  document.getElementById('ai-key-input').value = '';
+  aiModels = [];
+  await loadAIConfig();
+}
+
+function closeAIModal() {
+  document.getElementById('ai-modal').classList.add('hidden');
+}
+
+function onProviderChange() {
+  const provider = document.getElementById('ai-provider-select').value;
+  document.getElementById('ai-provider-hint').textContent = PROVIDER_HINTS[provider] || '';
+  aiModels = [];
+  renderAIModelDropdown(provider, '', []);
+  document.getElementById('ai-validate-status').textContent = '';
+}
+
+async function loadAIConfig() {
+  try {
+    const res = await fetch(API_BASE + '/dashboard/api/ai-config');
+    if (!res.ok) return;
+    const data = await res.json();
+    aiConfig = data;
+    document.getElementById('ai-provider-select').value = data.provider || 'gemini';
+    document.getElementById('ai-provider-hint').textContent = PROVIDER_HINTS[data.provider] || '';
+    document.getElementById('ai-current-display').textContent = (data.provider || 'gemini') + ' / ' + (data.model || '—');
+    renderAIModelDropdown(data.provider, data.model, []);
+    document.getElementById('ai-key-status').textContent = data.has_api_key ? '\u2705 API key stored' : '\u26A0\uFE0F No key stored yet';
+    document.getElementById('ai-key-status').className = 'text-xs ' + (data.has_api_key ? 'text-green-400' : 'text-yellow-400');
+  } catch(e) { console.error(e); }
+}
+
+function renderAIModelDropdown(provider, selectedModel, models) {
+  const sel = document.getElementById('ai-model-select');
+  sel.innerHTML = '';
+  if (models.length === 0) {
+    const opt = document.createElement('option');
+    opt.value = selectedModel || '';
+    opt.textContent = selectedModel ? selectedModel + '  (current \u2014 validate key to reload list)' : '\u2014 validate key to load available models \u2014';
+    sel.appendChild(opt);
+    return;
+  }
+  models.forEach(m => {
+    const opt = document.createElement('option');
+    opt.value = m.id;
+    opt.textContent = m.name || m.id;
+    if (m.id === selectedModel) opt.selected = true;
+    sel.appendChild(opt);
+  });
+  aiModels = models;
+}
+
+async function validateAndLoadModels() {
+  const provider = document.getElementById('ai-provider-select').value;
+  const apiKey   = document.getElementById('ai-key-input').value.trim();
+  const statusEl = document.getElementById('ai-validate-status');
+  const btn      = document.getElementById('ai-validate-btn');
+
+  if (!apiKey) { statusEl.textContent = 'Enter an API key first'; statusEl.className='text-xs text-yellow-400'; return; }
+
+  btn.disabled = true;
+  btn.textContent = 'Validating\u2026';
+  statusEl.textContent = '';
+
+  try {
+    const res = await fetch(API_BASE + '/dashboard/api/ai-models', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider, api_key: apiKey }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.valid) {
+      statusEl.textContent = data.error || 'Invalid API key';
+      statusEl.className = 'text-xs text-red-400';
+    } else {
+      statusEl.textContent = `\u2705 Key valid \u2014 ${data.models.length} model(s) loaded`;
+      statusEl.className = 'text-xs text-green-400';
+      renderAIModelDropdown(provider, aiConfig.model, data.models);
+    }
+  } catch(e) {
+    statusEl.textContent = 'Network error: ' + e.message;
+    statusEl.className = 'text-xs text-red-400';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Validate & Load Models';
+  }
+}
+
+async function saveAIConfig() {
+  const provider = document.getElementById('ai-provider-select').value;
+  const model    = document.getElementById('ai-model-select').value;
+  const apiKey   = document.getElementById('ai-key-input').value.trim();
+  const saveBtn  = document.getElementById('ai-save-btn');
+  const statusEl = document.getElementById('ai-validate-status');
+
+  if (!model) { statusEl.textContent = 'Select a model first'; statusEl.className='text-xs text-yellow-400'; return; }
+
+  saveBtn.disabled = true;
+  saveBtn.textContent = 'Saving\u2026';
+
+  const payload = { provider, model };
+  if (apiKey) payload.api_key = apiKey;
+
+  try {
+    const res = await fetch(API_BASE + '/dashboard/api/ai-config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      aiConfig.provider = provider;
+      aiConfig.model = model;
+      if (apiKey) aiConfig.has_api_key = true;
+      showToast(`AI config saved: ${provider} / ${model}`, 'success');
+      document.getElementById('ai-key-status').textContent = '\u2705 API key stored';
+      document.getElementById('ai-key-status').className = 'text-xs text-green-400';
+      document.getElementById('ai-key-input').value = '';
+      closeAIModal();
+    } else {
+      statusEl.textContent = data.error || 'Save failed';
+      statusEl.className = 'text-xs text-red-400';
+    }
+  } catch(e) {
+    statusEl.textContent = 'Network error: ' + e.message;
+    statusEl.className = 'text-xs text-red-400';
+  } finally {
+    saveBtn.disabled = false;
+    saveBtn.textContent = 'Save Configuration';
+  }
+}
 </script>
+
+<!-- AI CONFIG MODAL -->
+<div id="ai-modal" class="hidden fixed inset-0 z-50 modal-overlay flex items-center justify-center p-4">
+  <div class="glass rounded-2xl w-full max-w-lg border border-indigo-800/50 shadow-2xl">
+    <!-- Header -->
+    <div class="flex items-center justify-between px-6 py-4 border-b border-slate-700">
+      <div class="flex items-center gap-3">
+        <div class="w-8 h-8 rounded-lg bg-indigo-900/80 border border-indigo-700 flex items-center justify-center text-lg">&#x1F916;</div>
+        <div>
+          <h2 class="font-semibold text-white text-sm">AI Provider Configuration</h2>
+          <p class="text-xs text-slate-400">Hot-swap without redeploying infrastructure</p>
+        </div>
+      </div>
+      <button onclick="closeAIModal()" class="text-slate-500 hover:text-white transition-colors text-xl leading-none">&times;</button>
+    </div>
+    <!-- Body -->
+    <div class="px-6 py-5 space-y-5">
+
+      <!-- Current config badge -->
+      <div class="bg-slate-900/60 border border-slate-700 rounded-lg px-4 py-3 flex items-center gap-3">
+        <span class="text-xs text-slate-400">Active:</span>
+        <span class="text-xs font-mono text-indigo-300" id="ai-current-display">loading...</span>
+        <span class="ml-auto text-xs" id="ai-key-status"></span>
+      </div>
+
+      <!-- Provider select -->
+      <div>
+        <label class="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">AI Provider</label>
+        <select id="ai-provider-select" onchange="onProviderChange()"
+          class="w-full bg-slate-900/80 border border-slate-600 focus:border-indigo-500 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors cursor-pointer">
+          <option value="gemini">Google Gemini  (free tier: 15 req/min)</option>
+          <option value="claude">Anthropic Claude  (pay-as-you-go)</option>
+        </select>
+        <p id="ai-provider-hint" class="text-xs text-slate-500 mt-1.5">Get a free Gemini key at aistudio.google.com</p>
+      </div>
+
+      <!-- API Key input -->
+      <div>
+        <label class="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">API Key <span class="text-slate-500 normal-case font-normal">(leave blank to keep existing)</span></label>
+        <div class="flex gap-2">
+          <input type="password" id="ai-key-input" placeholder="Paste your API key here..."
+            class="flex-1 bg-slate-900/80 border border-slate-600 focus:border-indigo-500 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-600 outline-none transition-colors font-mono">
+          <button id="ai-validate-btn" onclick="validateAndLoadModels()"
+            class="px-4 py-2 rounded-lg text-xs font-semibold bg-indigo-800 hover:bg-indigo-700 text-indigo-100 border border-indigo-600 transition-colors whitespace-nowrap">
+            Validate &amp; Load
+          </button>
+        </div>
+        <p id="ai-validate-status" class="text-xs mt-2 min-h-[1rem]"></p>
+      </div>
+
+      <!-- Model select -->
+      <div>
+        <label class="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">Model</label>
+        <select id="ai-model-select"
+          class="w-full bg-slate-900/80 border border-slate-600 focus:border-indigo-500 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors">
+        </select>
+        <p class="text-xs text-slate-500 mt-1.5">Haiku (Claude) / 2.0-flash (Gemini) recommended for cost efficiency. Validate key to load all available models.</p>
+      </div>
+
+    </div>
+    <!-- Footer -->
+    <div class="px-6 py-4 border-t border-slate-700 flex items-center justify-between">
+      <p class="text-xs text-slate-500">Changes apply to the next AI analysis run.</p>
+      <div class="flex gap-3">
+        <button onclick="closeAIModal()" class="px-4 py-2 rounded-lg text-xs font-medium text-slate-400 hover:text-white glass border border-slate-600 hover:border-slate-400 transition-colors">Cancel</button>
+        <button id="ai-save-btn" onclick="saveAIConfig()"
+          class="px-4 py-2 rounded-lg text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white border border-indigo-500 transition-colors">
+          Save Configuration
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
 </body>
 </html>"""
