@@ -24,6 +24,7 @@ import urllib.error
 import boto3
 from datetime import datetime, timezone
 from botocore.exceptions import ClientError
+from boto3.dynamodb.conditions import Attr
 
 FINDINGS_TABLE    = os.environ["FINDINGS_TABLE"]
 SETTINGS_TABLE    = os.environ["SETTINGS_TABLE"]
@@ -423,16 +424,24 @@ SECURITY FINDING:
 CURRENT AWS RESOURCE STATE:
 {state_json}
 
-AVAILABLE BOTO3 OPERATIONS (only use these):
+REMEDIATION APPROACH:
 {available_ops}
 
 Generate a precise remediation runbook. Return this JSON exactly:
-{{"summary":"one sentence what will be changed","risk_level":"LOW","estimated_impact":"effect on live services","steps":[{{"n":1,"title":"step title","action":"what boto3 will do","api_call":"exact_client.method(exact_args)","expected":"what changes"}}],"rollback":[{{"n":1,"title":"undo title","action":"how to undo","api_call":"exact_client.method(exact_args)"}}],"warnings":["edge cases or cautions"]}}"""
+{{"summary":"one sentence what will be changed","risk_level":"LOW","estimated_impact":"effect on live services","execution_mode":"{execution_mode}","steps":[{{"n":1,"title":"step title","action":"what will be done","api_call":"exact boto3 or CLI command","expected":"what changes"}}],"rollback":[{{"n":1,"title":"undo title","action":"how to undo","api_call":"exact command to undo"}}],"warnings":["edge cases or cautions"]}}"""
 
 _AVAILABLE_OPS = {
-    "S3":  "s3.put_public_access_block(Bucket='NAME', PublicAccessBlockConfiguration={'BlockPublicAcls':True,'IgnorePublicAcls':True,'BlockPublicPolicy':True,'RestrictPublicBuckets':True})",
-    "EC2": "ec2.revoke_security_group_ingress(GroupId='SG_ID', IpPermissions=[<each_open_rule_from_current_state>])",
-    "IAM": "iam.update_access_key(UserName='USER', AccessKeyId='KEY_ID', Status='Inactive') — once per Active key",
+    "S3":      "s3.put_public_access_block(Bucket='NAME', PublicAccessBlockConfiguration={'BlockPublicAcls':True,'IgnorePublicAcls':True,'BlockPublicPolicy':True,'RestrictPublicBuckets':True})",
+    "EC2":     "ec2.revoke_security_group_ingress(GroupId='SG_ID', IpPermissions=[<each_open_rule_from_current_state>])",
+    "IAM":     "iam.update_access_key(UserName='USER', AccessKeyId='KEY_ID', Status='Inactive') — once per Active key",
+    "GENERIC": "This resource type has no inline executor. Generate detailed AWS CLI / boto3 commands for manual admin execution. Be specific with exact resource IDs, parameter values, and prerequisite checks.",
+}
+
+_EXECUTION_MODES = {
+    "S3":      "inline",
+    "EC2":     "inline",
+    "IAM":     "inline",
+    "GENERIC": "advisory",
 }
 
 
@@ -485,9 +494,139 @@ def _get_resource_state_for_runbook(resource_type: str, resource_id: str) -> dic
                 state["tags"] = {t["Key"]: t["Value"] for t in tags.get("Tags", [])}
             except ClientError as e:
                 state["error"] = e.response["Error"]["Code"]
+        else:
+            # Generic resource: extract identifiers for advisory runbook
+            state["note"] = (
+                f"No live state fetcher for {resource_type}. "
+                "Provide step-by-step CLI/Console remediation instructions."
+            )
+            # Try to extract a human-readable resource name from the ARN/ID
+            parts = resource_id.split(":")
+            state["resource_name"] = parts[-1] if parts else resource_id
     except Exception as e:
         state["fetch_error"] = str(e)
     return state
+
+
+def _get_ops_key(resource_type: str) -> str:
+    """Map AWS resource type string to remediation ops key (S3/EC2/IAM/GENERIC)."""
+    rt = resource_type.lower()
+    if "securitygroup" in rt or "ec2" in rt:
+        return "EC2"
+    if "iam" in rt:
+        return "IAM"
+    if "s3" in rt:
+        return "S3"
+    # DynamoDB, RDS, KMS, Lambda, ECS, etc. → advisory runbook (AI-generated manual steps)
+    return "GENERIC"
+
+
+def _apply_inline_for_finding(resource_type: str, resource_id: str, logs: list):
+    """
+    Attempt inline boto3 remediation for supported resource types.
+    Returns (success, undo_data, logs, inline_supported).
+    inline_supported=False means this resource type has no inline executor —
+    the caller should treat the runbook as advisory only.
+    """
+    ops_key = _get_ops_key(resource_type)
+    if ops_key == "S3":
+        success, undo_data, logs = _apply_s3_block(resource_id, logs)
+        return success, undo_data, logs, True
+    elif ops_key == "EC2":
+        success, undo_data, logs = _apply_sg_revoke(resource_id, logs)
+        return success, undo_data, logs, True
+    elif ops_key == "IAM":
+        success, undo_data, logs = _apply_iam_disable(resource_id, logs)
+        return success, undo_data, logs, True
+    else:
+        logs.append(f"[Advisory] No inline executor for: {resource_type}")
+        logs.append("[Advisory] This runbook is for manual execution via AWS Console or CLI.")
+        logs.append("[Advisory] Review each step and apply using the provided API calls.")
+        return False, {}, logs, False
+
+
+def _generate_runbook_with_context(item: dict, failure_history: list):
+    """
+    Generate AI runbook, optionally including prior failure context.
+    Returns (runbook_dict, error_str). On success error_str is None.
+    """
+    resource_type = item.get("resource_type", "")
+    resource_id   = item.get("resource_id", "")
+    ops_key       = _get_ops_key(resource_type)
+    current_state = _get_resource_state_for_runbook(resource_type, resource_id)
+
+    finding_summary = {
+        "resource_type": resource_type,
+        "resource_id": resource_id,
+        "severity": item.get("severity", ""),
+        "title": item.get("title", ""),
+        "description": item.get("description", ""),
+        "ai_analysis": item.get("ai_analysis", ""),
+    }
+
+    prompt = _RUNBOOK_PROMPT.format(
+        finding_json=json.dumps(finding_summary, default=str),
+        state_json=json.dumps(current_state, default=str),
+        available_ops=_AVAILABLE_OPS[ops_key],
+        execution_mode=_EXECUTION_MODES[ops_key],
+    )
+
+    if failure_history:
+        fail_ctx = f"\n\nPREVIOUS ATTEMPTS FAILED ({len(failure_history)}):\n"
+        for fh in failure_history:
+            tail = " | ".join(str(l) for l in fh.get("logs", [])[-5:])
+            fail_ctx += f"  Attempt {fh.get('attempt','?')} [{fh.get('source','?')}]: {tail}\n"
+        fail_ctx += "Revise your approach to avoid repeating the same failures.\n"
+        prompt += fail_ctx
+
+    text, err = _call_ai_direct(prompt, max_tokens=950)
+    if err:
+        return None, err
+
+    try:
+        return json.loads(text), None
+    except json.JSONDecodeError:
+        try:
+            return json.loads(text[text.index("{"):text.rindex("}") + 1]), None
+        except Exception:
+            return None, f"Invalid JSON from AI: {text[:300]}"
+
+
+def _update_finding_batch_result(finding_id: str, success: bool, logs: list,
+                                  undo_data: dict, item: dict, failed: bool = False,
+                                  advisory: bool = False):
+    """Persist batch remediation outcome to DynamoDB."""
+    if advisory:
+        new_status = "MANUAL_REVIEW"
+        rb_status  = "ADVISORY"
+    elif success:
+        new_status = "RESOLVED"
+        rb_status  = "BATCH_APPLIED"
+    elif failed:
+        new_status = "FAILED"
+        rb_status  = "BATCH_FAILED"
+    else:
+        new_status = item.get("status", "PENDING_APPROVAL")
+        rb_status  = "BATCH_FAILED"
+
+    try:
+        findings_table.update_item(
+            Key={"finding_id": finding_id},
+            UpdateExpression=(
+                "SET runbook_status = :rs, runbook_logs = :l, undo_data = :u, "
+                "runbook_applied_at = :t, #st = :fs"
+            ),
+            ExpressionAttributeNames={"#st": "status"},
+            ExpressionAttributeValues={
+                ":rs": rb_status,
+                ":l": json.dumps(logs, default=str),
+                ":u": json.dumps(undo_data, default=str),
+                ":t": now_iso(),
+                ":fs": new_status,
+            },
+        )
+    except Exception:
+        pass  # best-effort — don't let DynamoDB errors abort the batch
 
 
 def generate_runbook(body_str):
@@ -506,13 +645,7 @@ def generate_runbook(body_str):
     resource_type = item.get("resource_type", "")
     resource_id   = item.get("resource_id", "")
 
-    ops_key = "EC2" if ("SecurityGroup" in resource_type or "Ec2" in resource_type) else \
-              "IAM" if ("Iam" in resource_type or "iam" in resource_type.lower()) else \
-              "S3"  if "S3" in resource_type else None
-
-    if not ops_key:
-        return respond(400, {"error": f"No automated remediation available for resource type: {resource_type}"})
-
+    ops_key = _get_ops_key(resource_type)
     current_state = _get_resource_state_for_runbook(resource_type, resource_id)
 
     finding_summary = {
@@ -528,6 +661,7 @@ def generate_runbook(body_str):
         finding_json=json.dumps(finding_summary, default=str),
         state_json=json.dumps(current_state, default=str),
         available_ops=_AVAILABLE_OPS[ops_key],
+        execution_mode=_EXECUTION_MODES[ops_key],
     )
 
     text, err = _call_ai_direct(prompt, max_tokens=900)
@@ -542,13 +676,14 @@ def generate_runbook(body_str):
         except Exception:
             return respond(500, {"error": f"AI returned invalid JSON: {text[:300]}"})
 
+    runbook_status = "ADVISORY" if ops_key == "GENERIC" else "READY"
     try:
         findings_table.update_item(
             Key={"finding_id": finding_id},
             UpdateExpression="SET runbook = :r, runbook_status = :s, runbook_generated_at = :t",
             ExpressionAttributeValues={
                 ":r": json.dumps(runbook, default=str),
-                ":s": "READY",
+                ":s": runbook_status,
                 ":t": now_iso(),
             },
         )
@@ -557,7 +692,12 @@ def generate_runbook(body_str):
 
     provider = _get_setting("ai_provider", "gemini")
     model    = _get_setting("ai_model", "gemini-2.0-flash")
-    return respond(200, {"runbook": runbook, "provider": provider, "model": model})
+    return respond(200, {
+        "runbook": runbook,
+        "provider": provider,
+        "model": model,
+        "execution_mode": _EXECUTION_MODES[ops_key],
+    })
 
 
 def apply_runbook(body_str):
@@ -580,19 +720,36 @@ def apply_runbook(body_str):
     logs = []
     success = False
     undo_data = {}
+    inline_supported = True
 
     try:
-        if "S3" in resource_type:
-            success, undo_data, logs = _apply_s3_block(resource_id, logs)
-        elif "SecurityGroup" in resource_type or "Ec2" in resource_type:
-            success, undo_data, logs = _apply_sg_revoke(resource_id, logs)
-        elif "Iam" in resource_type or "iam" in resource_type.lower():
-            success, undo_data, logs = _apply_iam_disable(resource_id, logs)
-        else:
-            logs.append(f"ERROR: No inline remediation available for: {resource_type}")
+        success, undo_data, logs, inline_supported = _apply_inline_for_finding(resource_type, resource_id, logs)
     except Exception as e:
         logs.append(f"EXCEPTION: {e}")
         logs.append(f"TRACE: {traceback.format_exc().splitlines()[-3:]}")
+
+    if not inline_supported:
+        # Advisory mode — runbook generated for manual execution, not auto-applied
+        findings_table.update_item(
+            Key={"finding_id": finding_id},
+            UpdateExpression="SET runbook_status = :rs, runbook_logs = :l, runbook_applied_at = :t",
+            ExpressionAttributeValues={
+                ":rs": "ADVISORY",
+                ":l": json.dumps(logs, default=str),
+                ":t": now_iso(),
+            },
+        )
+        return respond(200, {
+            "success": False,
+            "advisory": True,
+            "runbook_status": "ADVISORY",
+            "logs": logs,
+            "can_undo": False,
+            "message": (
+                f"{resource_type} has no inline executor. "
+                "Follow the runbook steps manually via AWS Console or CLI."
+            ),
+        })
 
     new_status = "RUNBOOK_APPLIED" if success else "RUNBOOK_FAILED"
     findings_table.update_item(
@@ -1372,6 +1529,195 @@ def _delete_sim_resource(resource_type, resource_info):
                 pass
 
 
+# ── BATCH REMEDIATION ─────────────────────────────────────────────────────────
+
+def get_batch_status():
+    """GET /dashboard/api/remediate-all — return current batch job status."""
+    item = settings_table.get_item(Key={"setting_key": "batch_remediation_status"}).get("Item", {})
+    return respond(200, {
+        "status":       item.get("value", "idle"),
+        "total":        int(item.get("batch_total", 0)),
+        "done":         int(item.get("batch_done", 0)),
+        "resolved":     int(item.get("batch_resolved", 0)),
+        "failed":       int(item.get("batch_failed", 0)),
+        "advisory":     int(item.get("batch_advisory", 0)),
+        "summary":      item.get("batch_summary", ""),
+        "started_at":   item.get("batch_started_at", ""),
+        "completed_at": item.get("batch_completed_at", ""),
+    })
+
+
+def start_batch_remediate(body_str, context):
+    """POST /dashboard/api/remediate-all — kick off async batch remediation."""
+    body = parse_body(body_str) or {}
+    retry_enabled = bool(body.get("retry_enabled", True))
+    settings = {
+        "runbook_priority": bool(body.get("runbook_priority", True)),
+        "retry_enabled":    retry_enabled,
+        "max_retries":      max(1, min(int(body.get("max_retries", 3)), 5)),
+    }
+
+    scan     = findings_table.scan(FilterExpression=Attr("status").eq("PENDING_APPROVAL"))
+    eligible = scan.get("Items", [])
+
+    if not eligible:
+        return respond(200, {"status": "no_eligible_findings", "count": 0})
+
+    fn_name = os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "")
+    if not fn_name:
+        return respond(500, {"error": "Cannot determine Lambda function name for self-invoke"})
+
+    settings_table.put_item(Item={
+        "setting_key":      "batch_remediation_status",
+        "value":            "running",
+        "batch_total":      len(eligible),
+        "batch_done":       0,
+        "batch_resolved":   0,
+        "batch_failed":     0,
+        "batch_advisory":   0,
+        "batch_started_at": now_iso(),
+        "updated_at":       now_iso(),
+    })
+
+    try:
+        lam.invoke(
+            FunctionName=fn_name,
+            InvocationType="Event",
+            Payload=json.dumps({"__batch_remediate": True, "settings": settings}).encode(),
+        )
+    except Exception as e:
+        settings_table.put_item(Item={
+            "setting_key": "batch_remediation_status",
+            "value": "idle", "updated_at": now_iso(),
+        })
+        return respond(500, {"error": f"Failed to start batch: {e}"})
+
+    return respond(200, {"status": "started", "count": len(eligible)})
+
+
+def _do_batch_remediate(settings: dict):
+    """
+    Internal async worker — iterates all PENDING_APPROVAL findings and attempts
+    AI-guided remediation with optional runbook priority and retry logic.
+    """
+    runbook_priority = settings.get("runbook_priority", True)
+    retry_enabled    = settings.get("retry_enabled", True)
+    max_retries      = int(settings.get("max_retries", 3)) if retry_enabled else 1
+
+    scan     = findings_table.scan(FilterExpression=Attr("status").eq("PENDING_APPROVAL"))
+    eligible = scan.get("Items", [])
+
+    total    = len(eligible)
+    resolved = failed_count = advisory_count = 0
+
+    for idx, item in enumerate(eligible):
+        # Update progress counter
+        try:
+            settings_table.update_item(
+                Key={"setting_key": "batch_remediation_status"},
+                UpdateExpression="SET batch_done = :d",
+                ExpressionAttributeValues={":d": idx},
+            )
+        except Exception:
+            pass
+
+        finding_id    = item["finding_id"]
+        resource_type = item.get("resource_type", "")
+        resource_id   = item.get("resource_id", "")
+        failure_history: list = []
+        success = False
+
+        # ── STEP 1: Try existing READY runbook if priority mode is on ──────────
+        if (runbook_priority
+                and item.get("runbook")
+                and item.get("runbook_status") == "READY"):
+            logs = ["[Batch] Priority mode: applying existing runbook..."]
+            try:
+                s, undo_data, logs, inline = _apply_inline_for_finding(resource_type, resource_id, logs)
+                if not inline:
+                    logs.append("[Batch] Resource type is advisory-only — skipping inline apply")
+                elif s:
+                    _update_finding_batch_result(finding_id, True, logs, undo_data, item)
+                    resolved += 1
+                    success = True
+                else:
+                    failure_history.append({"attempt": 0, "source": "existing_runbook", "logs": logs})
+            except Exception as e:
+                failure_history.append({"attempt": 0, "source": "existing_runbook",
+                                        "logs": [f"Exception: {e}"]})
+
+        if success:
+            continue
+
+        # ── STEP 2: AI generation + inline apply, with retries ─────────────────
+        for attempt in range(1, max_retries + 1):
+            attempt_logs = [f"[Batch] AI attempt {attempt}/{max_retries}"]
+
+            if failure_history:
+                attempt_logs.append(f"[Context] {len(failure_history)} prior failure(s) fed to AI:")
+                for fh in failure_history:
+                    for ll in fh.get("logs", [])[-4:]:
+                        attempt_logs.append(f"  ↳ {ll}")
+
+            runbook, err = _generate_runbook_with_context(item, failure_history)
+            if err:
+                attempt_logs.append(f"[Batch] Runbook generation failed: {err}")
+                failure_history.append({"attempt": attempt, "source": "ai_generate",
+                                        "logs": attempt_logs[:]})
+                continue
+
+            try:
+                s, undo_data, all_logs, inline = _apply_inline_for_finding(
+                    resource_type, resource_id, attempt_logs
+                )
+
+                if not inline:
+                    # Advisory resource — store runbook + mark MANUAL_REVIEW
+                    _update_finding_batch_result(finding_id, False, all_logs, {}, item, advisory=True)
+                    advisory_count += 1
+                    success = True  # exit retry loop — nothing more to try inline
+                    break
+
+                if s:
+                    _update_finding_batch_result(finding_id, True, all_logs, undo_data, item)
+                    resolved += 1
+                    success = True
+                    break
+                else:
+                    failure_history.append({"attempt": attempt, "source": "ai_apply",
+                                            "logs": all_logs[:]})
+            except Exception as e:
+                attempt_logs.append(f"Exception during apply: {e}")
+                failure_history.append({"attempt": attempt, "source": "exception",
+                                        "logs": attempt_logs[:]})
+
+        if not success:
+            all_fail_logs: list = []
+            for fh in failure_history:
+                all_fail_logs.extend(fh.get("logs", []))
+            _update_finding_batch_result(finding_id, False, all_fail_logs, {}, item, failed=True)
+            failed_count += 1
+
+    # ── Finalise batch status ──────────────────────────────────────────────────
+    try:
+        settings_table.put_item(Item={
+            "setting_key":        "batch_remediation_status",
+            "value":              "idle",
+            "batch_total":        total,
+            "batch_done":         total,
+            "batch_resolved":     resolved,
+            "batch_failed":       failed_count,
+            "batch_advisory":     advisory_count,
+            "batch_summary": (
+                f"Resolved: {resolved}  |  Advisory: {advisory_count}  |  Failed: {failed_count}"
+            ),
+            "batch_completed_at": now_iso(),
+            "updated_at":         now_iso(),
+        })
+    except Exception:
+        pass
+
+
 # ── MAIN HANDLER ──────────────────────────────────────────────────────────────
 
 def lambda_handler(event, context):
@@ -1379,6 +1725,11 @@ def lambda_handler(event, context):
     if event.get("__terminate"):
         _do_terminate()
         return {"status": "terminated"}
+
+    # Async self-invocation for batch remediation
+    if event.get("__batch_remediate"):
+        _do_batch_remediate(event.get("settings", {}))
+        return {"status": "batch_complete"}
 
     method = event.get("httpMethod", "GET")
     path   = event.get("path", "/dashboard").rstrip("/") or "/dashboard"
@@ -1430,5 +1781,10 @@ def lambda_handler(event, context):
         return apply_runbook(body)
     if method == "POST" and path.endswith("/api/undo-runbook"):
         return undo_runbook(body)
+
+    if method == "GET" and path.endswith("/api/remediate-all"):
+        return get_batch_status()
+    if method == "POST" and path.endswith("/api/remediate-all"):
+        return start_batch_remediate(body, context)
 
     return respond(404, {"error": f"Unknown route: {method} {path}"})

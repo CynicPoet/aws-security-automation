@@ -113,6 +113,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <button onclick="openAIModal()" class="glass px-3 py-1.5 rounded-lg text-xs text-indigo-300 hover:text-indigo-100 border border-indigo-800 hover:border-indigo-600 transition-colors flex items-center gap-1" title="Configure AI provider and model">
       &#x1F916; AI
     </button>
+    <!-- Batch Remediate All -->
+    <button onclick="openRemediateAllModal()" class="glass px-3 py-1.5 rounded-lg text-xs text-violet-300 hover:text-violet-100 border border-violet-900 hover:border-violet-600 transition-colors flex items-center gap-1" title="Force AI remediation on all pending findings">
+      &#x26A1; Remediate All
+    </button>
     <button onclick="loadAll()" class="glass px-3 py-1.5 rounded-lg text-xs text-slate-300 hover:text-white border border-transparent hover:border-slate-500 transition-colors flex items-center gap-1">
       <span id="refresh-icon">&#8635;</span> Refresh
     </button>
@@ -639,6 +643,135 @@ async function toggleAIAnalysis() {
       showToast(aiAnalysisEnabled ? 'AI analysis enabled' : 'AI analysis disabled — keyword-based fallback active', 'success');
     } else { aiAnalysisEnabled=!aiAnalysisEnabled; updateAIAnalysisUI(); }
   } catch(e){ aiAnalysisEnabled=!aiAnalysisEnabled; updateAIAnalysisUI(); }
+}
+
+// ── BATCH REMEDIATION ──────────────────────────────────────────────────────────
+let remAllState = { runbookPriority: true, retryEnabled: true };
+let remPollTimer = null;
+
+function openRemediateAllModal() {
+  // Count eligible findings from cached list
+  const eligible = (allFindings || []).filter(f => f.status === 'PENDING_APPROVAL').length;
+  const badge = document.getElementById('rem-all-eligible-badge');
+  if (badge) {
+    badge.textContent = eligible > 0
+      ? `${eligible} finding${eligible > 1 ? 's' : ''} eligible for automated remediation`
+      : 'No pending findings eligible for remediation.';
+    badge.style.color = eligible > 0 ? '' : '#94a3b8';
+  }
+  // Reset to config view
+  document.getElementById('rem-all-config').classList.remove('hidden');
+  document.getElementById('rem-all-progress').classList.add('hidden');
+  document.getElementById('rem-view-btn').classList.add('hidden');
+  document.getElementById('rem-all-subtitle').textContent = 'Configure and start';
+  _updateRemToggle('rb-priority', remAllState.runbookPriority);
+  _updateRemToggle('retry', remAllState.retryEnabled);
+  document.getElementById('retry-count-row').style.display = remAllState.retryEnabled ? '' : 'none';
+  document.getElementById('rem-all-modal').classList.remove('hidden');
+}
+
+function closeRemediateAllModal() {
+  document.getElementById('rem-all-modal').classList.add('hidden');
+  if (remPollTimer) { clearInterval(remPollTimer); remPollTimer = null; }
+}
+
+function toggleRemOption(key) {
+  if (key === 'rb-priority') {
+    remAllState.runbookPriority = !remAllState.runbookPriority;
+    _updateRemToggle('rb-priority', remAllState.runbookPriority);
+  } else if (key === 'retry') {
+    remAllState.retryEnabled = !remAllState.retryEnabled;
+    _updateRemToggle('retry', remAllState.retryEnabled);
+    document.getElementById('retry-count-row').style.display = remAllState.retryEnabled ? '' : 'none';
+  }
+}
+
+function _updateRemToggle(key, on) {
+  const btn  = document.getElementById(key + '-toggle');
+  const knob = document.getElementById(key + '-knob');
+  if (!btn) return;
+  btn.style.background = on ? '#15803d' : '#7f1d1d';
+  knob.style.transform = on ? 'translateX(20px)' : 'translateX(0)';
+}
+
+async function startRemediateAll() {
+  const maxRetries = Math.min(5, Math.max(1, parseInt(document.getElementById('retry-count').value) || 3));
+  const btn = document.getElementById('rem-all-start-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spin inline-block">&#8635;</span> Starting…';
+
+  try {
+    const res = await fetch(API_BASE + '/dashboard/api/remediate-all', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        runbook_priority: remAllState.runbookPriority,
+        retry_enabled:    remAllState.retryEnabled,
+        max_retries:      maxRetries,
+      }),
+    });
+    const data = await res.json();
+
+    if (data.status === 'no_eligible_findings') {
+      showToast('No eligible findings to remediate', 'info');
+      btn.disabled = false;
+      btn.innerHTML = '&#x25B6; Start Remediation';
+      return;
+    }
+
+    // Switch to progress view
+    document.getElementById('rem-all-config').classList.add('hidden');
+    document.getElementById('rem-all-progress').classList.remove('hidden');
+    document.getElementById('rem-all-subtitle').textContent = 'Running…';
+    _updateRemProgress({ status: 'running', total: data.count, done: 0, resolved: 0, advisory: 0, failed: 0 });
+
+    // Poll for progress every 3 seconds
+    remPollTimer = setInterval(_pollBatchStatus, 3000);
+
+  } catch (e) {
+    showToast('Failed to start batch: ' + e, 'error');
+    btn.disabled = false;
+    btn.innerHTML = '&#x25B6; Start Remediation';
+  }
+}
+
+async function _pollBatchStatus() {
+  try {
+    const res  = await fetch(API_BASE + '/dashboard/api/remediate-all');
+    const data = await res.json();
+    _updateRemProgress(data);
+    if (data.status !== 'running') {
+      clearInterval(remPollTimer);
+      remPollTimer = null;
+      // Refresh findings list so status changes are visible
+      loadFindings();
+    }
+  } catch (e) { /* ignore transient errors */ }
+}
+
+function _updateRemProgress(data) {
+  const total    = data.total || 0;
+  const done     = data.done  || 0;
+  const pct      = total > 0 ? Math.round((done / total) * 100) : 0;
+  const running  = data.status === 'running';
+
+  document.getElementById('rem-prog-bar').style.width   = pct + '%';
+  document.getElementById('rem-prog-count').textContent = `${done} / ${total}`;
+  document.getElementById('rem-prog-label').textContent = running ? 'Processing…' : 'Complete';
+  document.getElementById('rem-stat-resolved').textContent = data.resolved || 0;
+  document.getElementById('rem-stat-advisory').textContent = data.advisory || 0;
+  document.getElementById('rem-stat-failed').textContent   = data.failed   || 0;
+
+  const msg = document.getElementById('rem-summary-msg');
+  if (!running && data.summary) {
+    msg.textContent = data.summary;
+    document.getElementById('rem-all-subtitle').textContent = 'Complete';
+    document.getElementById('rem-view-btn').classList.remove('hidden');
+    document.getElementById('rem-prog-bar').style.background = '#16a34a';
+    showToast('Batch remediation complete: ' + data.summary, 'success');
+  } else {
+    msg.textContent = running ? 'AI is analyzing and remediating findings…' : '';
+  }
 }
 
 // ── PIPELINE ───────────────────────────────────────────────────────────────────
@@ -1412,6 +1545,102 @@ async function saveAIConfig() {
           class="px-4 py-2 rounded-lg text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white border border-indigo-500 transition-colors">
           Save Configuration
         </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- REMEDIATE ALL MODAL -->
+<div id="rem-all-modal" class="hidden fixed inset-0 z-50 modal-overlay flex items-center justify-center p-4">
+  <div class="glass rounded-2xl w-full max-w-md border border-violet-800/50 shadow-2xl">
+    <div class="p-6">
+      <!-- Header -->
+      <div class="flex items-center justify-between mb-5">
+        <div>
+          <h2 class="text-lg font-semibold text-white flex items-center gap-2">&#x26A1; Batch AI Remediation</h2>
+          <p id="rem-all-subtitle" class="text-xs text-slate-400 mt-0.5">Configure and start</p>
+        </div>
+        <button onclick="closeRemediateAllModal()" class="text-slate-500 hover:text-white text-xl leading-none">&times;</button>
+      </div>
+
+      <!-- Config panel (shown before start) -->
+      <div id="rem-all-config">
+        <div id="rem-all-eligible-badge" class="mb-5 px-3 py-2 rounded-lg bg-violet-900/30 border border-violet-800/40 text-sm text-violet-200"></div>
+
+        <!-- Runbook Priority -->
+        <div class="mb-4">
+          <div class="flex items-center justify-between mb-1">
+            <span class="text-sm font-medium text-slate-200">Runbook Priority</span>
+            <button id="rb-priority-toggle" onclick="toggleRemOption('rb-priority')"
+              class="relative w-10 h-5 rounded-full transition-colors bg-green-700">
+              <span id="rb-priority-knob" class="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform translate-x-5"></span>
+            </button>
+          </div>
+          <p class="text-xs text-slate-500">If a runbook already exists for a finding, apply it first. Falls back to AI generation if unavailable or unsuccessful.</p>
+        </div>
+
+        <!-- Retry on failure -->
+        <div class="mb-4">
+          <div class="flex items-center justify-between mb-1">
+            <span class="text-sm font-medium text-slate-200">Retry on Failure</span>
+            <button id="retry-toggle" onclick="toggleRemOption('retry')"
+              class="relative w-10 h-5 rounded-full transition-colors bg-green-700">
+              <span id="retry-knob" class="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform translate-x-5"></span>
+            </button>
+          </div>
+          <p class="text-xs text-slate-500">Each retry feeds full failure logs back to the AI for improved accuracy. Failed findings move to <span class="text-red-400">FAILED</span> after max attempts.</p>
+          <div id="retry-count-row" class="mt-2 flex items-center gap-3">
+            <label class="text-xs text-slate-400">Max attempts</label>
+            <input id="retry-count" type="number" min="1" max="5" value="3"
+              class="w-16 px-2 py-1 rounded bg-slate-800 border border-slate-600 text-sm text-white text-center focus:outline-none focus:border-violet-500">
+            <span class="text-xs text-slate-500">(1 – 5)</span>
+          </div>
+        </div>
+
+        <!-- Action buttons -->
+        <div class="flex gap-3 mt-6">
+          <button onclick="closeRemediateAllModal()" class="flex-1 px-4 py-2 rounded-lg text-sm text-slate-400 border border-slate-700 hover:border-slate-500 transition-colors">Cancel</button>
+          <button onclick="startRemediateAll()" id="rem-all-start-btn"
+            class="flex-1 px-4 py-2 rounded-lg text-sm font-medium bg-violet-700 hover:bg-violet-600 text-white transition-colors flex items-center justify-center gap-2">
+            &#x25B6; Start Remediation
+          </button>
+        </div>
+      </div>
+
+      <!-- Progress panel (shown while running / after complete) -->
+      <div id="rem-all-progress" class="hidden">
+        <!-- Progress bar -->
+        <div class="mb-4">
+          <div class="flex justify-between text-xs text-slate-400 mb-1.5">
+            <span id="rem-prog-label">Processing…</span>
+            <span id="rem-prog-count">0 / 0</span>
+          </div>
+          <div class="w-full bg-slate-800 rounded-full h-2">
+            <div id="rem-prog-bar" class="bg-violet-500 h-2 rounded-full transition-all" style="width:0%"></div>
+          </div>
+        </div>
+        <!-- Stats row -->
+        <div class="grid grid-cols-3 gap-2 mb-4">
+          <div class="rounded-lg bg-green-900/30 border border-green-800/40 p-2 text-center">
+            <p class="text-lg font-bold text-green-300" id="rem-stat-resolved">0</p>
+            <p class="text-xs text-green-500">Resolved</p>
+          </div>
+          <div class="rounded-lg bg-yellow-900/30 border border-yellow-800/40 p-2 text-center">
+            <p class="text-lg font-bold text-yellow-300" id="rem-stat-advisory">0</p>
+            <p class="text-xs text-yellow-500">Advisory</p>
+          </div>
+          <div class="rounded-lg bg-red-900/30 border border-red-800/40 p-2 text-center">
+            <p class="text-lg font-bold text-red-300" id="rem-stat-failed">0</p>
+            <p class="text-xs text-red-500">Failed</p>
+          </div>
+        </div>
+        <!-- Status message -->
+        <p id="rem-summary-msg" class="text-xs text-slate-400 text-center mb-4"></p>
+        <!-- Buttons -->
+        <div class="flex gap-3">
+          <button onclick="closeRemediateAllModal()" class="flex-1 px-4 py-2 rounded-lg text-sm text-slate-400 border border-slate-700 hover:border-slate-500 transition-colors">Close</button>
+          <button onclick="loadAll()" id="rem-view-btn" class="hidden flex-1 px-4 py-2 rounded-lg text-sm font-medium bg-slate-700 hover:bg-slate-600 text-white transition-colors">View Findings</button>
+        </div>
       </div>
     </div>
   </div>
