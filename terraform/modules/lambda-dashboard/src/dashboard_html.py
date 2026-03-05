@@ -70,6 +70,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <button onclick="loadAll()" class="glass px-3 py-1.5 rounded-lg text-xs text-slate-300 hover:text-white border border-transparent hover:border-slate-500 transition-colors flex items-center gap-1">
       <span id="refresh-icon">&#8635;</span> Refresh
     </button>
+    <button onclick="clearAllFindings()" class="glass px-3 py-1.5 rounded-lg text-xs text-orange-400 hover:text-orange-200 border border-orange-900 hover:border-orange-700 transition-colors" title="Delete all findings from DynamoDB (demo reset)">
+      &#x1F5D1; Clear All
+    </button>
   </div>
 </header>
 
@@ -281,7 +284,7 @@ function renderTable() {
   document.getElementById('empty').classList.add('hidden');
   document.getElementById('findings-table').classList.remove('hidden');
   document.getElementById('findings-body').innerHTML = findings.map(f => `
-    <tr class="border-b border-slate-800 row-hover transition-colors" onclick="openModal(${JSON.stringify(f.finding_id)})">
+    <tr class="border-b border-slate-800 row-hover transition-colors" data-fid="${esc(f.finding_id)}" onclick="openModal(this.dataset.fid)">
       <td class="px-4 py-3"><span class="px-2 py-0.5 rounded text-xs font-semibold ${sevClass(f.severity)}">${esc(f.severity||'N/A')}</span></td>
       <td class="px-4 py-3">
         <p class="text-xs text-slate-400">${esc(f.resource_type||'')}</p>
@@ -300,12 +303,17 @@ function renderTable() {
 function actionBtns(f) {
   const s = (f.status||'').toUpperCase();
   if(s!=='PENDING_APPROVAL') return '<span class="text-xs text-slate-600">—</span>';
+  const fid = esc(f.finding_id);
   const actions = safeParse(f.recommended_actions,[]);
-  let btns = actions.slice(0,2).map(a =>
-    `<button onclick="quickApprove(${JSON.stringify(f.finding_id)},${a.action_id})" class="btn-approve px-2 py-1 rounded text-xs font-medium transition-colors">${esc((a.description||'Approve').substring(0,30))}</button>`
-  ).join('');
-  btns += `<button onclick="quickReject(${JSON.stringify(f.finding_id)})" class="btn-reject px-2 py-1 rounded text-xs transition-colors">Reject</button>`;
-  return `<div class="flex flex-wrap gap-1">${btns}</div>`;
+  // Always show at least one approve button — use first action or generic label
+  const appLabel = actions.length>0
+    ? esc((actions[0].description||'Approve').substring(0,25))
+    : 'Approve';
+  const appAid = actions.length>0 ? (actions[0].action_id||1) : 1;
+  return `<div class="flex flex-wrap gap-1">
+    <button data-fid="${fid}" data-aid="${appAid}" onclick="quickApprove(this.dataset.fid,this.dataset.aid)" class="btn-approve px-2 py-1 rounded text-xs font-medium transition-colors">${appLabel}</button>
+    <button data-fid="${fid}" onclick="quickReject(this.dataset.fid)" class="btn-reject px-2 py-1 rounded text-xs transition-colors">Reject</button>
+  </div>`;
 }
 
 // ── SETTINGS ───────────────────────────────────────────────────────────────────
@@ -453,9 +461,10 @@ function openModal(findingId) {
   const appSec=document.getElementById('modal-approval-section');
   if((f.status||'').toUpperCase()==='PENDING_APPROVAL'){
     appSec.classList.remove('hidden');
-    document.getElementById('modal-approve-buttons').innerHTML=actions.map(a=>
+    const appBtns = actions.map(a=>
       `<button onclick="doAction('approve',${a.action_id})" class="btn-approve w-full py-2 rounded-lg text-xs font-medium transition-colors text-left px-3">&#x2713; Approve: ${esc(a.description||'Action '+a.action_id)}</button>`
-    ).join('');
+    ).join('') || `<button onclick="doAction('approve',1)" class="btn-approve w-full py-2 rounded-lg text-xs font-medium transition-colors text-left px-3">&#x2713; Approve Remediation</button>`;
+    document.getElementById('modal-approve-buttons').innerHTML=appBtns;
   } else appSec.classList.add('hidden');
   // Show email resend always
   document.getElementById('modal-email-section').classList.remove('hidden');
@@ -490,6 +499,18 @@ async function submitAction(findingId, action, actionId) {
     if(res.ok){ showToast('Action submitted: '+action,'success'); await loadFindings(); }
     else showToast(data.error||'Action failed','error');
   } catch(e){ showToast('Network error: '+e.message,'error'); }
+}
+
+async function clearAllFindings() {
+  if(!confirm('Delete ALL findings from the dashboard? This cannot be undone.')) return;
+  try {
+    const res = await fetch(API_BASE+'/dashboard/api/findings',{
+      method:'DELETE', headers:{'Content-Type':'application/json'},
+    });
+    const data = await res.json();
+    if(res.ok){ showToast(`Cleared ${data.deleted} finding(s)`,'success'); await loadFindings(); }
+    else showToast(data.error||'Clear failed','error');
+  } catch(e){ showToast('Network error','error'); }
 }
 
 async function resendEmail() {

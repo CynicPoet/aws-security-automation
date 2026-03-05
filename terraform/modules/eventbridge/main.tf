@@ -1,6 +1,7 @@
 resource "aws_cloudwatch_event_rule" "security_hub_findings" {
   name        = "securityhub-finding-rule"
   description = "Capture Security Hub FAILED findings and route to Step Functions"
+  state       = "DISABLED" # Disabled by default — enable via Dashboard 'Start Pipeline' for real monitoring
 
   event_pattern = jsonencode({
     source      = ["aws.securityhub"]

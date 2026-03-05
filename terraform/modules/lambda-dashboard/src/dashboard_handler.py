@@ -120,6 +120,18 @@ def list_findings():
     return respond(200, {"findings": items})
 
 
+def clear_findings():
+    """Delete all findings from DynamoDB — for demo reset."""
+    result = findings_table.scan(ProjectionExpression="finding_id")
+    items = result.get("Items", [])
+    if not items:
+        return respond(200, {"status": "ok", "deleted": 0})
+    with findings_table.batch_writer() as batch:
+        for item in items:
+            batch.delete_item(Key={"finding_id": item["finding_id"]})
+    return respond(200, {"status": "ok", "deleted": len(items)})
+
+
 def get_settings():
     result = settings_table.get_item(Key={"setting_key": "email_notifications"})
     item = result.get("Item", {"setting_key": "email_notifications", "value": "false"})
@@ -454,6 +466,8 @@ def lambda_handler(event, context):
 
     if method == "GET" and path.endswith("/api/findings"):
         return list_findings()
+    if method == "DELETE" and path.endswith("/api/findings"):
+        return clear_findings()
 
     if method == "GET" and path.endswith("/api/settings"):
         return get_settings()

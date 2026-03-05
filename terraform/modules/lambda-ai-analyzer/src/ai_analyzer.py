@@ -91,7 +91,7 @@ def lambda_handler(event: dict, context) -> dict:
     except Exception as exc:
         _log("ERROR", finding_id, resource_type, resource_id, severity,
              message=f"Failed to retrieve AI API key from Secrets Manager: {exc}")
-        return _fallback_response(resource_type, f"Could not retrieve API key: {exc}")
+        return _fallback_response(resource_type, f"Could not retrieve API key: {exc}", finding)
 
     # ── 2. BUILD INFRASTRUCTURE CONTEXT ──────────────────────────────────────
     try:
@@ -125,7 +125,7 @@ def lambda_handler(event: dict, context) -> dict:
     except RuntimeError as exc:
         _log("ERROR", finding_id, resource_type, resource_id, severity,
              message=f"AI provider call failed: {exc}")
-        return _fallback_response(resource_type, f"AI provider error: {exc}")
+        return _fallback_response(resource_type, f"AI provider error: {exc}", finding)
 
     # ── 5. VALIDATE AND APPLY SAFETY OVERRIDES ────────────────────────────────
     try:
@@ -133,7 +133,7 @@ def lambda_handler(event: dict, context) -> dict:
     except ValueError as exc:
         _log("ERROR", finding_id, resource_type, resource_id, severity,
              message=f"AI response validation failed: {exc}")
-        return _fallback_response(resource_type, f"Response validation failed: {exc}")
+        return _fallback_response(resource_type, f"Response validation failed: {exc}", finding)
 
     duration_ms = int(time.time() * 1000) - start_ms
     analysis["provider_used"] = AI_PROVIDER
@@ -185,10 +185,16 @@ def _get_api_key() -> str:
     return secret["api_key"]
 
 
-def _fallback_response(resource_type: str, error_reason: str) -> dict:
+def _fallback_response(resource_type: str, error_reason: str, finding: dict = None) -> dict:
     """
     Return a safe fallback when the AI call fails.
-    Escalates to admin and recommends manual review — never auto-remediates on error.
+
+    Auto-remediates if:
+      - resource type has a known playbook (S3 / SG / IAM)
+      - AND finding title/description contains no safety keywords
+        (CI-Pipeline, Production, ServiceAccount, AutoRemediationExclude)
+
+    Escalates to admin otherwise.
     """
     playbook = "manual"
     if "S3" in resource_type:
@@ -198,20 +204,45 @@ def _fallback_response(resource_type: str, error_reason: str) -> dict:
     elif "SecurityGroup" in resource_type:
         playbook = "vpc_remediation"
 
+    # Only auto-remediate when we have a known playbook AND no safety keywords
+    safe_to_auto = playbook != "manual"
+    if safe_to_auto and finding:
+        text = (
+            finding.get("title", "") + " " + finding.get("description", "")
+        ).lower()
+        safety_keywords = [
+            "ci-pipeline", "ci_pipeline", "production", "service account",
+            "serviceaccount", "autoremediationexclude",
+        ]
+        if any(kw in text for kw in safety_keywords):
+            safe_to_auto = False
+
+    action_desc = (
+        "Approve automated remediation"
+        if safe_to_auto
+        else "AI unavailable — admin should review and decide"
+    )
+
     return {
         "risk_level": "HIGH",
         "is_false_positive": False,
         "false_positive_reason": None,
-        "analysis": f"AI analysis unavailable ({error_reason}). Treating as HIGH risk — manual review recommended.",
-        "safe_to_auto_remediate": False,
-        "escalation_reason": f"AI analysis failed — defaulting to admin escalation. Error: {error_reason}",
+        "analysis": (
+            f"AI analysis unavailable ({error_reason}). "
+            + ("Proceeding with automated remediation." if safe_to_auto else "Manual review recommended.")
+        ),
+        "safe_to_auto_remediate": safe_to_auto,
+        "escalation_reason": (
+            None if safe_to_auto
+            else f"AI analysis failed — defaulting to admin escalation."
+        ),
         "recommended_playbook": playbook,
         "recommended_actions": [
             {
                 "action_id": 1,
                 "playbook": playbook,
-                "description": "AI unavailable — admin should review and decide",
-                "risk": "UNKNOWN",
+                "description": action_desc,
+                "risk": "MEDIUM" if safe_to_auto else "UNKNOWN",
                 "reversible": True,
             }
         ],

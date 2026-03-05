@@ -9,7 +9,7 @@
 6. NO Lambda Layers needed — all Python uses stdlib + boto3 only (Gemini/Claude via urllib.request)
 7. Archive provider: hashicorp/archive ~> 2.4 (already in providers.tf)
 8. CI GitHub Actions runs `terraform fmt -check -recursive` — always run `terraform fmt -recursive` before committing
-9. Infrastructure is CURRENTLY DESTROYED — run `terraform apply` to redeploy
+9. Infrastructure is DEPLOYED — API GW ID: f6bntx7jg3, Account: 024848485894
 
 ---
 
@@ -161,7 +161,7 @@ aws secretsmanager put-secret-value `
   --secret-id security-automation/ai-api-key `
   --secret-string '{"api_key":"YOUR_GEMINI_KEY_HERE","provider":"gemini"}'
 ```
-3. **Dashboard URL**: `https://{api-gw-id}.execute-api.us-east-1.amazonaws.com/prod/dashboard`
+3. **Dashboard URL**: `https://f6bntx7jg3.execute-api.us-east-1.amazonaws.com/prod/dashboard`
 4. **Verify**: Run `terraform plan` → should show 0 changes
 
 ---

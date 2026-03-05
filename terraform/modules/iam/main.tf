@@ -308,7 +308,7 @@ data "aws_iam_policy_document" "lambda_dashboard_policy" {
     effect = "Allow"
     actions = [
       "dynamodb:Scan", "dynamodb:GetItem", "dynamodb:PutItem",
-      "dynamodb:UpdateItem", "dynamodb:Query",
+      "dynamodb:UpdateItem", "dynamodb:Query", "dynamodb:DeleteItem",
     ]
     resources = ["arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/security-automation-*"]
   }
@@ -353,9 +353,11 @@ data "aws_iam_policy_document" "lambda_dashboard_policy" {
     sid    = "SimulationS3"
     effect = "Allow"
     actions = [
-      "s3:CreateBucket", "s3:DeleteBucket", "s3:PutPublicAccessBlock",
-      "s3:GetPublicAccessBlock", "s3:ListBucket", "s3:DeleteObject",
-      "s3:ListObjectsV2", "s3:PutBucketAcl",
+      "s3:CreateBucket", "s3:DeleteBucket",
+      "s3:PutPublicAccessBlock", "s3:GetPublicAccessBlock",
+      "s3:PutBucketOwnershipControls", "s3:GetBucketOwnershipControls",
+      "s3:ListBucket", "s3:DeleteObject", "s3:DeleteObjectVersion",
+      "s3:ListBucketVersions", "s3:PutBucketAcl", "s3:GetBucketAcl",
     ]
     resources = ["*"]
   }
