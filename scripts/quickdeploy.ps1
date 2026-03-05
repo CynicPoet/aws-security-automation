@@ -4,7 +4,7 @@
 
 $ErrorActionPreference = "Stop"
 $SCRIPTS_DIR = $PSScriptRoot
-$TF_DIR      = "$SCRIPTS_DIR\..\terraform"
+$TF_DIR      = [System.IO.Path]::GetFullPath("$SCRIPTS_DIR\..\terraform")
 
 # Load credentials from local config
 $CONFIG = "$SCRIPTS_DIR\config.ps1"
@@ -29,22 +29,22 @@ Write-Host "========================================" -ForegroundColor Cyan
 
 # ── STEP 1: FORMAT ────────────────────────────────────────────────────────────
 Write-Step 1 5 "Terraform format check..."
-terraform -chdir=$TF_DIR fmt -check -recursive 2>&1 | Out-Null
+terraform -chdir="$TF_DIR" fmt -check -recursive 2>&1 | Out-Null
 if ($LASTEXITCODE -ne 0) {
-    terraform -chdir=$TF_DIR fmt -recursive | Out-Null
+    terraform -chdir="$TF_DIR" fmt -recursive | Out-Null
     Write-Info "Auto-formatted terraform files"
 }
 Write-OK "Format OK"
 
 # ── STEP 2: VALIDATE ──────────────────────────────────────────────────────────
 Write-Step 2 5 "Validating configuration..."
-terraform -chdir=$TF_DIR validate
+terraform -chdir="$TF_DIR" validate
 if ($LASTEXITCODE -ne 0) { Write-Host "Validation failed." -ForegroundColor Red; exit 1 }
 Write-OK "Configuration valid"
 
 # ── STEP 3: APPLY ─────────────────────────────────────────────────────────────
 Write-Step 3 5 "Deploying infrastructure (~2-3 minutes)..."
-terraform -chdir=$TF_DIR apply `
+terraform -chdir="$TF_DIR" apply `
     -var="admin_email=$ADMIN_EMAIL" `
     -var="aws_region=$AWS_REGION" `
     -auto-approve
@@ -53,7 +53,7 @@ Write-OK "Infrastructure deployed"
 
 # ── STEP 4: GET URL ───────────────────────────────────────────────────────────
 Write-Step 4 5 "Getting dashboard URL..."
-$base_url     = terraform -chdir=$TF_DIR output -raw api_gateway_base_url
+$base_url     = terraform -chdir="$TF_DIR" output -raw api_gateway_base_url
 $dashboard_url = "$base_url/dashboard"
 Write-OK "Dashboard URL: $dashboard_url"
 
