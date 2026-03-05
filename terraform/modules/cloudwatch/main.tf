@@ -131,11 +131,11 @@ resource "aws_cloudwatch_dashboard" "live_monitor" {
         width  = 24
         height = 6
         properties = {
-          title   = "Security Automation — Recent Events"
-          region  = "us-east-1"
-          view    = "table"
-          query   = "SOURCE '/aws/security-automation' | fields @timestamp, level, event_type, resource_id, action, status | sort @timestamp desc | limit 50"
-          period  = 3600
+          title  = "Security Automation — Recent Events"
+          region = "us-east-1"
+          view   = "table"
+          query  = "SOURCE '/aws/security-automation' | fields @timestamp, level, event_type, resource_id, action, status | sort @timestamp desc | limit 50"
+          period = 3600
         }
       },
     ]

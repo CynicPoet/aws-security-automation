@@ -201,9 +201,9 @@ data "aws_iam_policy_document" "lambda_ai_analyzer_policy" {
   }
 
   statement {
-    sid     = "SecretsManager"
-    effect  = "Allow"
-    actions = ["secretsmanager:GetSecretValue"]
+    sid       = "SecretsManager"
+    effect    = "Allow"
+    actions   = ["secretsmanager:GetSecretValue"]
     resources = ["arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:security-automation/ai-api-key*"]
   }
 
@@ -238,9 +238,9 @@ resource "aws_iam_role" "lambda_notification" {
 
 data "aws_iam_policy_document" "lambda_notification_policy" {
   statement {
-    sid     = "SNSPublish"
-    effect  = "Allow"
-    actions = ["sns:Publish"]
+    sid       = "SNSPublish"
+    effect    = "Allow"
+    actions   = ["sns:Publish"]
     resources = ["arn:aws:sns:${var.aws_region}:${data.aws_caller_identity.current.account_id}:security-automation-admin-alerts"]
   }
 
@@ -316,9 +316,9 @@ resource "aws_iam_role" "step_functions" {
 
 data "aws_iam_policy_document" "step_functions_policy" {
   statement {
-    sid     = "InvokeLambdas"
-    effect  = "Allow"
-    actions = ["lambda:InvokeFunction"]
+    sid       = "InvokeLambdas"
+    effect    = "Allow"
+    actions   = ["lambda:InvokeFunction"]
     resources = ["arn:aws:lambda:${var.aws_region}:${data.aws_caller_identity.current.account_id}:function:security-auto-*"]
   }
 
@@ -358,9 +358,9 @@ resource "aws_iam_role" "eventbridge" {
 
 data "aws_iam_policy_document" "eventbridge_policy" {
   statement {
-    sid     = "StartStateMachine"
-    effect  = "Allow"
-    actions = ["states:StartExecution"]
+    sid       = "StartStateMachine"
+    effect    = "Allow"
+    actions   = ["states:StartExecution"]
     resources = ["arn:aws:states:${var.aws_region}:${data.aws_caller_identity.current.account_id}:stateMachine:SecurityRemediationStateMachine"]
   }
 }

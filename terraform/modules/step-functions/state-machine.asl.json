@@ -1,0 +1,309 @@
+{
+  "Comment": "Security Automation: detect -> AI analyze -> auto-remediate or escalate -> verify -> update",
+  "StartAt": "ParseFinding",
+  "States": {
+
+    "ParseFinding": {
+      "Type": "Pass",
+      "Comment": "Extract first finding from EventBridge event and normalize",
+      "Parameters": {
+        "finding_id.$": "$.detail.findings[0].Id",
+        "product_arn.$": "$.detail.findings[0].ProductArn",
+        "resource_type.$": "$.detail.findings[0].Resources[0].Type",
+        "resource_id.$": "$.detail.findings[0].Resources[0].Id",
+        "resource_arn.$": "$.detail.findings[0].Resources[0].Id",
+        "severity.$": "$.detail.findings[0].Severity.Label",
+        "title.$": "$.detail.findings[0].Title",
+        "description.$": "$.detail.findings[0].Description",
+        "region.$": "$.region",
+        "account_id.$": "$.account"
+      },
+      "ResultPath": "$.finding",
+      "Next": "AIAnalysis"
+    },
+
+    "AIAnalysis": {
+      "Type": "Task",
+      "Resource": "${ai_analyzer_function_arn}",
+      "Parameters": {
+        "finding.$": "$.finding"
+      },
+      "ResultPath": "$.ai_analysis",
+      "TimeoutSeconds": 90,
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "HandleError"
+        }
+      ],
+      "Next": "IsFalsePositive"
+    },
+
+    "IsFalsePositive": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.ai_analysis.is_false_positive",
+          "BooleanEquals": true,
+          "Next": "SuppressFalsePositive"
+        }
+      ],
+      "Default": "IsSafeToAutoRemediate"
+    },
+
+    "SuppressFalsePositive": {
+      "Type": "Pass",
+      "Parameters": {
+        "event_type": "FALSE_POSITIVE",
+        "message": "AI determined finding is a false positive - suppressing",
+        "finding.$": "$.finding",
+        "ai_analysis.$": "$.ai_analysis"
+      },
+      "ResultPath": null,
+      "Next": "EndFalsePositive"
+    },
+
+    "EndFalsePositive": {
+      "Type": "Succeed"
+    },
+
+    "IsSafeToAutoRemediate": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.ai_analysis.safe_to_auto_remediate",
+          "BooleanEquals": true,
+          "Next": "DetermineResourceType"
+        }
+      ],
+      "Default": "NotifyAdmin"
+    },
+
+    "DetermineResourceType": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.finding.resource_type",
+          "StringMatches": "*S3*",
+          "Next": "RemediateS3"
+        },
+        {
+          "Variable": "$.finding.resource_type",
+          "StringMatches": "*Iam*",
+          "Next": "RemediateIAM"
+        },
+        {
+          "Variable": "$.finding.resource_type",
+          "StringMatches": "*SecurityGroup*",
+          "Next": "RemediateVPC"
+        }
+      ],
+      "Default": "EndUnsupported"
+    },
+
+    "EndUnsupported": {
+      "Type": "Succeed"
+    },
+
+    "RemediateS3": {
+      "Type": "Task",
+      "Resource": "${s3_remediation_function_arn}",
+      "Parameters": {
+        "finding.$": "$.finding",
+        "ai_analysis.$": "$.ai_analysis"
+      },
+      "ResultPath": "$.remediation_result",
+      "TimeoutSeconds": 90,
+      "Retry": [{"ErrorEquals": ["Lambda.ServiceException"], "IntervalSeconds": 5, "MaxAttempts": 2, "BackoffRate": 2}],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "HandleError"}],
+      "Next": "VerifyRemediation"
+    },
+
+    "RemediateIAM": {
+      "Type": "Task",
+      "Resource": "${iam_remediation_function_arn}",
+      "Parameters": {
+        "finding.$": "$.finding",
+        "ai_analysis.$": "$.ai_analysis"
+      },
+      "ResultPath": "$.remediation_result",
+      "TimeoutSeconds": 90,
+      "Retry": [{"ErrorEquals": ["Lambda.ServiceException"], "IntervalSeconds": 5, "MaxAttempts": 2, "BackoffRate": 2}],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "HandleError"}],
+      "Next": "VerifyRemediation"
+    },
+
+    "RemediateVPC": {
+      "Type": "Task",
+      "Resource": "${vpc_remediation_function_arn}",
+      "Parameters": {
+        "finding.$": "$.finding",
+        "ai_analysis.$": "$.ai_analysis"
+      },
+      "ResultPath": "$.remediation_result",
+      "TimeoutSeconds": 90,
+      "Retry": [{"ErrorEquals": ["Lambda.ServiceException"], "IntervalSeconds": 5, "MaxAttempts": 2, "BackoffRate": 2}],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "HandleError"}],
+      "Next": "VerifyRemediation"
+    },
+
+    "NotifyAdmin": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+      "Parameters": {
+        "FunctionName": "${notification_function_arn}",
+        "Payload": {
+          "finding.$": "$.finding",
+          "ai_analysis.$": "$.ai_analysis",
+          "task_token.$": "$$.Task.Token"
+        }
+      },
+      "ResultPath": "$.approval_result",
+      "HeartbeatSeconds": 3600,
+      "TimeoutSeconds": 3660,
+      "Catch": [
+        {
+          "ErrorEquals": ["States.HeartbeatTimeout", "States.Timeout"],
+          "ResultPath": "$.timeout_error",
+          "Next": "EndTimeout"
+        },
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "HandleError"
+        }
+      ],
+      "Next": "RouteAdminDecision"
+    },
+
+    "RouteAdminDecision": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.approval_result.admin_decision",
+          "StringEquals": "APPROVED",
+          "Next": "ExecuteApprovedPlaybook"
+        },
+        {
+          "Variable": "$.approval_result.admin_decision",
+          "StringEquals": "REJECTED",
+          "Next": "EndRejected"
+        },
+        {
+          "Variable": "$.approval_result.admin_decision",
+          "StringEquals": "MANUAL",
+          "Next": "EndManual"
+        }
+      ],
+      "Default": "HandleError"
+    },
+
+    "ExecuteApprovedPlaybook": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.finding.resource_type",
+          "StringMatches": "*S3*",
+          "Next": "ApprovedRemediateS3"
+        },
+        {
+          "Variable": "$.finding.resource_type",
+          "StringMatches": "*Iam*",
+          "Next": "ApprovedRemediateIAM"
+        },
+        {
+          "Variable": "$.finding.resource_type",
+          "StringMatches": "*SecurityGroup*",
+          "Next": "ApprovedRemediateVPC"
+        }
+      ],
+      "Default": "EndUnsupported"
+    },
+
+    "ApprovedRemediateS3": {
+      "Type": "Task",
+      "Resource": "${s3_remediation_function_arn}",
+      "Parameters": {
+        "finding.$": "$.finding",
+        "ai_analysis.$": "$.ai_analysis",
+        "approved_action.$": "$.approval_result.approved_action"
+      },
+      "ResultPath": "$.remediation_result",
+      "TimeoutSeconds": 90,
+      "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "HandleError"}],
+      "Next": "VerifyRemediation"
+    },
+
+    "ApprovedRemediateIAM": {
+      "Type": "Task",
+      "Resource": "${iam_remediation_function_arn}",
+      "Parameters": {
+        "finding.$": "$.finding",
+        "ai_analysis.$": "$.ai_analysis",
+        "approved_action.$": "$.approval_result.approved_action"
+      },
+      "ResultPath": "$.remediation_result",
+      "TimeoutSeconds": 90,
+      "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "HandleError"}],
+      "Next": "VerifyRemediation"
+    },
+
+    "ApprovedRemediateVPC": {
+      "Type": "Task",
+      "Resource": "${vpc_remediation_function_arn}",
+      "Parameters": {
+        "finding.$": "$.finding",
+        "ai_analysis.$": "$.ai_analysis",
+        "approved_action.$": "$.approval_result.approved_action"
+      },
+      "ResultPath": "$.remediation_result",
+      "TimeoutSeconds": 90,
+      "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "HandleError"}],
+      "Next": "VerifyRemediation"
+    },
+
+    "VerifyRemediation": {
+      "Type": "Task",
+      "Resource": "${verification_function_arn}",
+      "Parameters": {
+        "finding.$": "$.finding",
+        "remediation_result.$": "$.remediation_result"
+      },
+      "ResultPath": "$.verification_result",
+      "TimeoutSeconds": 60,
+      "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "HandleError"}],
+      "Next": "EndSuccess"
+    },
+
+    "EndSuccess": {
+      "Type": "Succeed"
+    },
+
+    "EndRejected": {
+      "Type": "Succeed"
+    },
+
+    "EndManual": {
+      "Type": "Succeed"
+    },
+
+    "EndTimeout": {
+      "Type": "Succeed"
+    },
+
+    "HandleError": {
+      "Type": "Fail",
+      "Error": "PipelineError",
+      "Cause": "An error occurred - check CloudWatch logs"
+    }
+  }
+}
