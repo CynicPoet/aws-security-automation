@@ -16,14 +16,14 @@ resource "random_id" "suffix" {
   byte_length = 2
 }
 
-# ── DATA ──────────────────────────────────────────────────────────────────────
+# -- DATA ----------------------------------------------------------------------
 data "aws_vpc" "default" {
   default = true
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CATEGORY A — AUTO-REMEDIATION (MEDIUM severity, Environment=Test)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# CATEGORY A -- AUTO-REMEDIATION (MEDIUM severity, Environment=Test)
+# -----------------------------------------------------------------------------
 
 # A1: Public S3 bucket
 resource "aws_s3_bucket" "test_public" {
@@ -36,8 +36,17 @@ resource "aws_s3_bucket" "test_public" {
   }
 }
 
+resource "aws_s3_bucket_public_access_block" "test_public" {
+  bucket                  = aws_s3_bucket.test_public.id
+  block_public_acls       = false
+  block_public_policy     = false
+  ignore_public_acls      = false
+  restrict_public_buckets = false
+}
+
 resource "aws_s3_bucket_ownership_controls" "test_public" {
-  bucket = aws_s3_bucket.test_public.id
+  bucket     = aws_s3_bucket.test_public.id
+  depends_on = [aws_s3_bucket_public_access_block.test_public]
   rule { object_ownership = "BucketOwnerPreferred" }
 }
 
@@ -47,10 +56,10 @@ resource "aws_s3_bucket_acl" "test_public" {
   depends_on = [aws_s3_bucket_ownership_controls.test_public]
 }
 
-# A2: Security group — SSH open to world
+# A2: Security group -- SSH open to world
 resource "aws_security_group" "test_open_ssh" {
   name        = "secauto-test-open-ssh"
-  description = "Demo: SSH open to 0.0.0.0/0 — Category A auto-remediation"
+  description = "Demo: SSH open to 0.0.0.0/0 - Category A auto-remediation"
   vpc_id      = data.aws_vpc.default.id
 
   ingress {
@@ -75,10 +84,10 @@ resource "aws_security_group" "test_open_ssh" {
   }
 }
 
-# A3: Security group — ALL traffic open to world
+# A3: Security group -- ALL traffic open to world
 resource "aws_security_group" "test_open_all" {
   name        = "secauto-test-open-all"
-  description = "Demo: All traffic open to 0.0.0.0/0 — Category A auto-remediation"
+  description = "Demo: All traffic open to 0.0.0.0/0 - Category A auto-remediation"
   vpc_id      = data.aws_vpc.default.id
 
   ingress {
@@ -103,11 +112,11 @@ resource "aws_security_group" "test_open_all" {
   }
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CATEGORY B — ADMIN APPROVAL REQUIRED (HIGH severity)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# CATEGORY B -- ADMIN APPROVAL REQUIRED (HIGH severity)
+# -----------------------------------------------------------------------------
 
-# B1: IAM user with admin access key — tagged Role=CI-Pipeline so AI escalates
+# B1: IAM user with admin access key -- tagged Role=CI-Pipeline so AI escalates
 resource "aws_iam_user" "test_risky" {
   name = "secauto-test-risky-user"
   tags = {
@@ -126,10 +135,10 @@ resource "aws_iam_user_policy_attachment" "test_risky_admin" {
   policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
 }
 
-# B2: Security group — RDP open, tagged Environment=Production so AI escalates
+# B2: Security group -- RDP open, tagged Environment=Production so AI escalates
 resource "aws_security_group" "test_open_rdp" {
   name        = "secauto-test-open-rdp"
-  description = "Demo: RDP open to 0.0.0.0/0, Production tag — Category B approval"
+  description = "Demo: RDP open to 0.0.0.0/0, Production tag - Category B approval"
   vpc_id      = data.aws_vpc.default.id
 
   ingress {
@@ -155,10 +164,10 @@ resource "aws_security_group" "test_open_rdp" {
   }
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# FALSE POSITIVE DEMO — bucket is intentionally public (static website)
+# -----------------------------------------------------------------------------
+# FALSE POSITIVE DEMO -- bucket is intentionally public (static website)
 # AI should detect PublicAccess=Intentional tag and suppress without acting
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 resource "aws_s3_bucket" "test_fp_website" {
   bucket        = "secauto-test-fp-website-${random_id.suffix.hex}"
@@ -172,8 +181,17 @@ resource "aws_s3_bucket" "test_fp_website" {
   }
 }
 
+resource "aws_s3_bucket_public_access_block" "test_fp_website" {
+  bucket                  = aws_s3_bucket.test_fp_website.id
+  block_public_acls       = false
+  block_public_policy     = false
+  ignore_public_acls      = false
+  restrict_public_buckets = false
+}
+
 resource "aws_s3_bucket_ownership_controls" "test_fp_website" {
-  bucket = aws_s3_bucket.test_fp_website.id
+  bucket     = aws_s3_bucket.test_fp_website.id
+  depends_on = [aws_s3_bucket_public_access_block.test_fp_website]
   rule { object_ownership = "BucketOwnerPreferred" }
 }
 
