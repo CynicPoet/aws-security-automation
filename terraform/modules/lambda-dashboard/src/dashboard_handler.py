@@ -18,6 +18,7 @@ Routes:
 import json
 import os
 import time
+import traceback
 import urllib.request
 import urllib.error
 import boto3
@@ -160,9 +161,11 @@ def _get_setting(key, default="false"):
 def get_settings():
     email = _get_setting("email_notifications", "false")
     auto_rem = _get_setting("auto_remediation", "true")
+    ai_analysis = _get_setting("ai_analysis_enabled", "true")
     return respond(200, {
         "email_notifications": email,
         "auto_remediation": auto_rem,
+        "ai_analysis_enabled": ai_analysis,
     })
 
 
@@ -179,6 +182,10 @@ def update_settings(body_str):
         val = "true" if body["auto_remediation"] else "false"
         settings_table.put_item(Item={"setting_key": "auto_remediation", "value": val, "updated_at": now_iso()})
         updated["auto_remediation"] = val
+    if "ai_analysis_enabled" in body:
+        val = "true" if body["ai_analysis_enabled"] else "false"
+        settings_table.put_item(Item={"setting_key": "ai_analysis_enabled", "value": val, "updated_at": now_iso()})
+        updated["ai_analysis_enabled"] = val
     return respond(200, {"status": "ok", "updated": updated})
 
 
@@ -423,7 +430,7 @@ Generate a precise remediation runbook. Return this JSON exactly:
 {{"summary":"one sentence what will be changed","risk_level":"LOW","estimated_impact":"effect on live services","steps":[{{"n":1,"title":"step title","action":"what boto3 will do","api_call":"exact_client.method(exact_args)","expected":"what changes"}}],"rollback":[{{"n":1,"title":"undo title","action":"how to undo","api_call":"exact_client.method(exact_args)"}}],"warnings":["edge cases or cautions"]}}"""
 
 _AVAILABLE_OPS = {
-    "S3":  "s3.put_bucket_public_access_block(Bucket='NAME', PublicAccessBlockConfiguration={'BlockPublicAcls':True,'IgnorePublicAcls':True,'BlockPublicPolicy':True,'RestrictPublicBuckets':True})",
+    "S3":  "s3.put_public_access_block(Bucket='NAME', PublicAccessBlockConfiguration={'BlockPublicAcls':True,'IgnorePublicAcls':True,'BlockPublicPolicy':True,'RestrictPublicBuckets':True})",
     "EC2": "ec2.revoke_security_group_ingress(GroupId='SG_ID', IpPermissions=[<each_open_rule_from_current_state>])",
     "IAM": "iam.update_access_key(UserName='USER', AccessKeyId='KEY_ID', Status='Inactive') — once per Active key",
 }
@@ -585,6 +592,7 @@ def apply_runbook(body_str):
             logs.append(f"ERROR: No inline remediation available for: {resource_type}")
     except Exception as e:
         logs.append(f"EXCEPTION: {e}")
+        logs.append(f"TRACE: {traceback.format_exc().splitlines()[-3:]}")
 
     new_status = "RUNBOOK_APPLIED" if success else "RUNBOOK_FAILED"
     findings_table.update_item(
@@ -662,27 +670,62 @@ def undo_runbook(body_str):
 
 # ── INLINE REMEDIATION HELPERS ─────────────────────────────────────────────────
 
+def _s3_put_public_access_block(bucket, block_acls, ignore_acls, block_policy, restrict_buckets):
+    """
+    Call the S3 public access block API using the correct method name for the runtime's
+    boto3 version. boto3 < 1.9.84 uses put_public_access_block; newer uses
+    put_bucket_public_access_block. Try both names so the code works on any Lambda runtime.
+    """
+    cfg = {
+        "BlockPublicAcls": bool(block_acls),
+        "IgnorePublicAcls": bool(ignore_acls),
+        "BlockPublicPolicy": bool(block_policy),
+        "RestrictPublicBuckets": bool(restrict_buckets),
+    }
+    if hasattr(s3, "put_public_access_block"):
+        s3.put_public_access_block(Bucket=bucket, PublicAccessBlockConfiguration=cfg)
+    else:
+        s3.put_bucket_public_access_block(Bucket=bucket, PublicAccessBlockConfiguration=cfg)
+
+
 def _apply_s3_block(resource_id, logs):
     bucket = resource_id.split(":::")[-1].split("/")[0]
+    if not bucket:
+        logs.append("[S3] \u2717 Could not parse bucket name from resource_id")
+        return False, {}, logs
     logs.append(f"[S3] Target bucket: {bucket}")
     undo_data = {"type": "s3", "bucket": bucket, "original": {}}
+    # Capture pre-state for undo; NoSuchPublicAccessBlockConfiguration means defaults (all False)
     try:
         r = s3.get_public_access_block(Bucket=bucket)
         undo_data["original"] = r.get("PublicAccessBlockConfiguration", {})
         logs.append(f"[S3] Pre-state captured: {undo_data['original']}")
+        # Idempotency: if already fully blocked, skip the write
+        cfg = undo_data["original"]
+        if all(cfg.get(k) for k in ("BlockPublicAcls", "IgnorePublicAcls", "BlockPublicPolicy", "RestrictPublicBuckets")):
+            logs.append("[S3] \u2713 Already fully blocked — no changes needed")
+            return True, undo_data, logs
     except ClientError as e:
-        logs.append(f"[S3] Could not capture pre-state: {e.response['Error']['Code']}")
+        code = e.response["Error"]["Code"]
+        if code == "NoSuchPublicAccessBlockConfiguration":
+            logs.append("[S3] No existing public access block — will apply fresh configuration")
+            undo_data["original"] = {"BlockPublicAcls": False, "IgnorePublicAcls": False,
+                                     "BlockPublicPolicy": False, "RestrictPublicBuckets": False}
+        elif code == "NoSuchBucket":
+            logs.append(f"[S3] \u2717 Bucket '{bucket}' does not exist — may have been deleted")
+            return False, undo_data, logs
+        else:
+            logs.append(f"[S3] Pre-state warning ({code}): proceeding with remediation")
     try:
-        s3.put_bucket_public_access_block(
-            Bucket=bucket,
-            PublicAccessBlockConfiguration={
-                "BlockPublicAcls": True, "IgnorePublicAcls": True,
-                "BlockPublicPolicy": True, "RestrictPublicBuckets": True,
-            },
-        )
+        _s3_put_public_access_block(bucket, True, True, True, True)
         logs.append("[S3] \u2713 Applied: all public access blocked (BlockPublicAcls, IgnorePublicAcls, BlockPublicPolicy, RestrictPublicBuckets = True)")
     except ClientError as e:
-        logs.append(f"[S3] \u2717 Failed: {e.response['Error']['Code']}: {e.response['Error']['Message']}")
+        code = e.response["Error"]["Code"]
+        msg  = e.response["Error"]["Message"]
+        if code == "AccessDenied":
+            logs.append(f"[S3] \u2717 Access denied — likely blocked by account-level S3 policy. The bucket may already be protected.")
+        else:
+            logs.append(f"[S3] \u2717 Failed ({code}): {msg}")
         return False, undo_data, logs
     try:
         r = s3.get_public_access_block(Bucket=bucket)
@@ -690,10 +733,10 @@ def _apply_s3_block(resource_id, logs):
         if all(cfg.get(k) for k in ("BlockPublicAcls", "IgnorePublicAcls", "BlockPublicPolicy", "RestrictPublicBuckets")):
             logs.append("[S3] \u2713 Verified: all public access blocked")
             return True, undo_data, logs
-        logs.append(f"[S3] \u2717 Verification failed: {cfg}")
+        logs.append(f"[S3] \u2717 Verification failed — unexpected state: {cfg}")
         return False, undo_data, logs
     except ClientError:
-        logs.append("[S3] \u2713 Applied (verification skipped)")
+        logs.append("[S3] \u2713 Applied (verification read skipped)")
         return True, undo_data, logs
 
 
@@ -705,7 +748,11 @@ def _apply_sg_revoke(resource_id, logs):
         r = ec2.describe_security_groups(GroupIds=[sg_id])
         sg = r["SecurityGroups"][0]
     except ClientError as e:
-        logs.append(f"[SG] \u2717 Cannot describe SG: {e.response['Error']['Code']}")
+        code = e.response["Error"]["Code"]
+        if code in ("InvalidGroup.NotFound", "InvalidGroupId.NotFound"):
+            logs.append(f"[SG] \u2717 Security group '{sg_id}' not found — may have been deleted")
+        else:
+            logs.append(f"[SG] \u2717 Cannot describe SG: {code}: {e.response['Error']['Message']}")
         return False, undo_data, logs
 
     rules_to_revoke = []
@@ -762,7 +809,11 @@ def _apply_iam_disable(resource_id, logs):
         keys = iam.list_access_keys(UserName=username)
         active_keys = [k["AccessKeyId"] for k in keys.get("AccessKeyMetadata", []) if k["Status"] == "Active"]
     except ClientError as e:
-        logs.append(f"[IAM] \u2717 Cannot list access keys: {e.response['Error']['Code']}")
+        code = e.response["Error"]["Code"]
+        if code == "NoSuchEntity":
+            logs.append(f"[IAM] \u2717 IAM user '{username}' does not exist — may have been deleted")
+        else:
+            logs.append(f"[IAM] \u2717 Cannot list access keys: {code}: {e.response['Error']['Message']}")
         return False, undo_data, logs
 
     if not active_keys:
@@ -803,14 +854,12 @@ def _undo_s3_block(undo_data, logs):
         return False, logs
     logs.append(f"[UNDO S3] Restoring bucket: {bucket} to original state: {original}")
     try:
-        s3.put_bucket_public_access_block(
-            Bucket=bucket,
-            PublicAccessBlockConfiguration={
-                "BlockPublicAcls":      original.get("BlockPublicAcls", False),
-                "IgnorePublicAcls":     original.get("IgnorePublicAcls", False),
-                "BlockPublicPolicy":    original.get("BlockPublicPolicy", False),
-                "RestrictPublicBuckets": original.get("RestrictPublicBuckets", False),
-            },
+        _s3_put_public_access_block(
+            bucket,
+            original.get("BlockPublicAcls", False),
+            original.get("IgnorePublicAcls", False),
+            original.get("BlockPublicPolicy", False),
+            original.get("RestrictPublicBuckets", False),
         )
         logs.append("[UNDO S3] \u2713 Restored original public access block settings")
         return True, logs

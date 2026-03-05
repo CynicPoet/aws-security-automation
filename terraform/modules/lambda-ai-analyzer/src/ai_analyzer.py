@@ -86,6 +86,15 @@ def lambda_handler(event: dict, context) -> dict:
     # ── 0. CHECK DYNAMODB FOR RUNTIME AI CONFIG OVERRIDES ────────────────────
     active_provider, active_model = _get_ai_config_override()
 
+    # Short-circuit: if AI analysis is disabled via dashboard toggle, skip API call entirely
+    if not _is_ai_analysis_enabled():
+        _log("AI_ANALYSIS_SKIPPED", finding_id, resource_type, resource_id, severity,
+             message="AI analysis disabled via dashboard toggle — using keyword-based fallback")
+        result = _fallback_response(resource_type, "AI analysis disabled via dashboard toggle", finding)
+        result["provider_used"] = active_provider
+        result["model_used"] = active_model
+        return result
+
     _log("AI_ANALYSIS_START", finding_id, resource_type, resource_id, severity,
          message=f"AI analysis started using provider={active_provider} model={active_model}")
 
@@ -231,6 +240,26 @@ def _is_auto_remediation_enabled() -> bool:
         return item.get("value", "true").lower() != "false"
     except Exception:
         return True  # fail-safe: if DynamoDB unreachable, don't block remediation
+
+
+def _is_ai_analysis_enabled() -> bool:
+    """
+    Read ai_analysis_enabled from DynamoDB settings table.
+    Returns True (AI ON) if: setting missing, value='true', or DynamoDB unreachable.
+    Returns False only when explicitly set to 'false'.
+    """
+    if not SETTINGS_TABLE:
+        return True
+    try:
+        db = boto3.resource("dynamodb", region_name=REGION)
+        table = db.Table(SETTINGS_TABLE)
+        result = table.get_item(Key={"setting_key": "ai_analysis_enabled"})
+        item = result.get("Item")
+        if item is None:
+            return True  # not set → default ON
+        return item.get("value", "true").lower() != "false"
+    except Exception:
+        return True  # fail-safe: if DynamoDB unreachable, keep AI on
 
 
 def _get_api_key() -> str:

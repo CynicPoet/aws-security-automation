@@ -88,6 +88,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <span id="pipeline-label" class="text-xs text-slate-400">Pipeline</span>
       <button id="pipeline-btn" onclick="togglePipeline()" class="text-xs px-2 py-1 rounded glass border border-slate-600 hover:border-slate-400 transition-colors"></button>
     </div>
+    <!-- AI Analysis toggle -->
+    <div class="flex items-center gap-2" title="When OFF: AI API calls are skipped entirely — uses keyword-based routing. Saves tokens during testing.">
+      <span class="text-xs text-slate-400">AI</span>
+      <button id="ai-analysis-toggle" onclick="toggleAIAnalysis()" class="relative w-10 h-5 rounded-full transition-colors bg-green-700" title="Toggle AI analysis. OFF = no API calls, uses keyword fallback.">
+        <span id="ai-analysis-knob" class="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform translate-x-5"></span>
+      </button>
+    </div>
     <!-- Auto-Remediation toggle -->
     <div class="flex items-center gap-2" title="When OFF: all findings require manual admin approval — ideal for demos">
       <span class="text-xs text-slate-400">Auto-Fix</span>
@@ -391,6 +398,7 @@ let currentTab = 'all';
 let currentFinding = null;
 let emailEnabled = false;
 let autoRemediationEnabled = true;
+let aiAnalysisEnabled = true;
 let pipelineState = 'UNKNOWN';
 let activeSim = null;
 let aiSessionKey = '';  // Cached API key for current browser session
@@ -564,7 +572,8 @@ async function loadSettings() {
     const data = await res.json();
     emailEnabled = data.email_notifications==='true';
     autoRemediationEnabled = data.auto_remediation!=='false';
-    updateEmailUI(); updateAutoRemUI();
+    aiAnalysisEnabled = data.ai_analysis_enabled!=='false';
+    updateEmailUI(); updateAutoRemUI(); updateAIAnalysisUI();
   } catch(e){}
 }
 
@@ -606,6 +615,30 @@ async function toggleAutoRemediation() {
       showToast(autoRemediationEnabled ? 'Auto-remediation enabled' : 'Auto-remediation disabled — all findings will route to approval', 'success');
     } else { autoRemediationEnabled=!autoRemediationEnabled; updateAutoRemUI(); }
   } catch(e){ autoRemediationEnabled=!autoRemediationEnabled; updateAutoRemUI(); }
+}
+
+function updateAIAnalysisUI() {
+  const btn=document.getElementById('ai-analysis-toggle'), knob=document.getElementById('ai-analysis-knob');
+  if(aiAnalysisEnabled){ btn.style.background='#15803d'; knob.style.transform='translateX(20px)'; }
+  else{ btn.style.background='#7f1d1d'; knob.style.transform='translateX(0)'; }
+}
+
+async function toggleAIAnalysis() {
+  const next = !aiAnalysisEnabled;
+  const msg = next
+    ? 'Enable AI analysis? Findings will be analyzed by the AI provider (uses API tokens).'
+    : 'Disable AI analysis? Findings will use keyword-based routing only — no API tokens consumed. Ideal for testing.';
+  if(!confirm(msg)) return;
+  aiAnalysisEnabled = next; updateAIAnalysisUI();
+  try {
+    const res = await fetch(API_BASE+'/dashboard/api/settings',{
+      method:'PUT', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({ai_analysis_enabled:aiAnalysisEnabled}),
+    });
+    if(res.ok){
+      showToast(aiAnalysisEnabled ? 'AI analysis enabled' : 'AI analysis disabled — keyword-based fallback active', 'success');
+    } else { aiAnalysisEnabled=!aiAnalysisEnabled; updateAIAnalysisUI(); }
+  } catch(e){ aiAnalysisEnabled=!aiAnalysisEnabled; updateAIAnalysisUI(); }
 }
 
 // ── PIPELINE ───────────────────────────────────────────────────────────────────
