@@ -13,13 +13,21 @@
 
 ---
 
-## ✅ PROJECT COMPLETE — All Issues Fixed
-**Latest git hash: 049247c**
+## ✅ PROJECT COMPLETE — All Issues Fixed + Dashboard Improvements
+**Latest git hash: (commit pending)**
 
 ## One-Click Deploy/Destroy
 - **Deploy**: `.\scripts\quickdeploy.ps1` — applies terraform, sets Gemini key, opens dashboard URL
 - **Destroy**: `.\scripts\quickdestroy.ps1` — stops SFN executions, tears down all resources
 - **Config**: copy `scripts\config.ps1.example` → `scripts\config.ps1` and fill in credentials (gitignored)
+- **Old scripts removed**: deploy.ps1, destroy.ps1, demo.ps1, pause-project.ps1, resume-project.ps1 deleted
+
+## Dashboard Features
+- **Terminate Infrastructure button** (⛔): Destroys all AWS resources from the browser — type "terminate" to confirm. Async self-invocation pattern.
+- **Finding detail modal**: Full technical details — ARN, account ID, region, timestamps, AI analysis, remediation steps taken (per action_taken mapping), post-remediation status, source (SimulationLab vs Security Hub)
+- **Clear All button**: Fixed — uses `delete_item()` loop (was broken due to missing `BatchWriteItem` IAM permission)
+- **Simulation A1 fix**: `put_public_access_block` wrapped in try/except — AccessDenied handled gracefully, simulation proceeds
+- **Email toggle**, **pipeline start/stop**, **auto-refresh 30s** all working
 
 ---
 

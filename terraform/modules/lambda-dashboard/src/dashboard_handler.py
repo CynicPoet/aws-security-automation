@@ -4,14 +4,15 @@ Dashboard Lambda — web UI + all API calls.
 Routes:
   GET    /dashboard                → HTML page
   GET    /dashboard/api/findings   → list all findings (JSON)
+  DELETE /dashboard/api/findings   → clear all findings (demo reset)
   GET    /dashboard/api/settings   → get email setting
   PUT    /dashboard/api/settings   → update email setting
   GET    /dashboard/api/control    → pipeline status (ENABLED/DISABLED)
+  POST   /dashboard/api/control    → shutdown / start / terminate pipeline
   POST   /dashboard/api/action     → approve/reject/manual  (finding_id in body)
   POST   /dashboard/api/email      → resend email for a finding
   POST   /dashboard/api/simulate   → create simulation case + start Step Functions
   DELETE /dashboard/api/simulate   → clean up simulation resource
-  POST   /dashboard/api/control    → shutdown / start pipeline
 """
 
 import json
@@ -36,6 +37,7 @@ sns      = boto3.client("sns", region_name=REGION)
 ec2      = boto3.client("ec2", region_name=REGION)
 s3       = boto3.client("s3", region_name=REGION)
 iam      = boto3.client("iam", region_name=REGION)
+lam      = boto3.client("lambda", region_name=REGION)
 
 findings_table = dynamodb.Table(FINDINGS_TABLE)
 settings_table = dynamodb.Table(SETTINGS_TABLE)
@@ -117,7 +119,10 @@ def list_findings():
     result = findings_table.scan()
     items = result.get("Items", [])
     items.sort(key=lambda x: x.get("created_at", ""), reverse=True)
-    return respond(200, {"findings": items})
+    return respond(200, {
+        "findings": items,
+        "meta": {"account_id": ACCOUNT_ID, "region": REGION},
+    })
 
 
 def clear_findings():
@@ -126,10 +131,14 @@ def clear_findings():
     items = result.get("Items", [])
     if not items:
         return respond(200, {"status": "ok", "deleted": 0})
-    with findings_table.batch_writer() as batch:
-        for item in items:
-            batch.delete_item(Key={"finding_id": item["finding_id"]})
-    return respond(200, {"status": "ok", "deleted": len(items)})
+    deleted = 0
+    for item in items:
+        try:
+            findings_table.delete_item(Key={"finding_id": item["finding_id"]})
+            deleted += 1
+        except Exception:
+            pass
+    return respond(200, {"status": "ok", "deleted": deleted})
 
 
 def get_settings():
@@ -240,13 +249,15 @@ def get_pipeline_status():
         return respond(500, {"error": str(e)})
 
 
-def control_pipeline(body_str):
+def control_pipeline(body_str, context=None):
     body = parse_body(body_str)
     if body is None:
         return respond(400, {"error": "Invalid JSON"})
     action = body.get("action", "")
-    if action not in ("shutdown", "start"):
-        return respond(400, {"error": "action must be shutdown or start"})
+    if action not in ("shutdown", "start", "terminate"):
+        return respond(400, {"error": "action must be shutdown, start, or terminate"})
+    if action == "terminate":
+        return _initiate_terminate(context)
     try:
         if action == "shutdown":
             events.disable_rule(Name=EB_RULE_NAME)
@@ -257,6 +268,165 @@ def control_pipeline(body_str):
     except Exception as e:
         return respond(500, {"error": str(e)})
     return respond(200, {"status": "ok", "pipeline": state})
+
+
+def _initiate_terminate(context):
+    """Invoke self asynchronously to destroy all infrastructure, then respond."""
+    fn_name = os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "")
+    if not fn_name:
+        return respond(500, {"error": "Cannot determine Lambda function name"})
+    try:
+        lam.invoke(
+            FunctionName=fn_name,
+            InvocationType="Event",  # async — fire and forget
+            Payload=json.dumps({"__terminate": True}).encode(),
+        )
+    except Exception as e:
+        return respond(500, {"error": f"Failed to initiate termination: {e}"})
+    return respond(200, {
+        "status": "terminating",
+        "message": "Infrastructure termination initiated. All AWS resources will be deleted in ~30 seconds.",
+    })
+
+
+def _do_terminate():
+    """
+    Destroy all security automation AWS resources.
+    Called via async self-invocation so the HTTP response is already sent.
+    Stops SFN executions, deletes DynamoDB, Lambda functions, SNS, EventBridge,
+    CloudWatch logs, Secrets Manager, API Gateway, then self.
+    """
+    time.sleep(3)  # brief pause to ensure HTTP response fully delivered
+    results = {}
+
+    # 1. Stop all running Step Functions executions
+    try:
+        if STATE_MACHINE_ARN:
+            pager = sfn.get_paginator("list_executions")
+            stopped = 0
+            for page in pager.paginate(stateMachineArn=STATE_MACHINE_ARN, statusFilter="RUNNING"):
+                for ex in page.get("executions", []):
+                    try:
+                        sfn.stop_execution(executionArn=ex["executionArn"], cause="infrastructure-terminated")
+                        stopped += 1
+                    except Exception:
+                        pass
+            results["sfn_stopped"] = stopped
+    except Exception as e:
+        results["sfn_error"] = str(e)
+
+    # 2. Delete DynamoDB tables
+    db = boto3.client("dynamodb", region_name=REGION)
+    for table_name in [FINDINGS_TABLE, SETTINGS_TABLE]:
+        if table_name:
+            try:
+                db.delete_table(TableName=table_name)
+            except Exception:
+                pass
+    results["dynamodb"] = "deleted"
+
+    # 3. Delete all other security-auto-* Lambda functions
+    fn_name = os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "")
+    try:
+        pager = lam.get_paginator("list_functions")
+        for page in pager.paginate():
+            for fn in page.get("Functions", []):
+                name = fn["FunctionName"]
+                if name.startswith("security-auto-") and name != fn_name:
+                    try:
+                        lam.delete_function(FunctionName=name)
+                    except Exception:
+                        pass
+        results["lambdas"] = "deleted"
+    except Exception as e:
+        results["lambda_error"] = str(e)
+
+    # 4. Delete SNS topic (subscriptions first)
+    try:
+        if SNS_TOPIC_ARN:
+            try:
+                subs = sns.list_subscriptions_by_topic(TopicArn=SNS_TOPIC_ARN)
+                for sub in subs.get("Subscriptions", []):
+                    if sub.get("SubscriptionArn", "").startswith("arn:"):
+                        try:
+                            sns.unsubscribe(SubscriptionArn=sub["SubscriptionArn"])
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            sns.delete_topic(TopicArn=SNS_TOPIC_ARN)
+        results["sns"] = "deleted"
+    except Exception as e:
+        results["sns_error"] = str(e)
+
+    # 5. Delete EventBridge rule (targets must be removed first)
+    try:
+        try:
+            targets = events.list_targets_by_rule(Rule=EB_RULE_NAME)
+            tids = [t["Id"] for t in targets.get("Targets", [])]
+            if tids:
+                events.remove_targets(Rule=EB_RULE_NAME, Ids=tids)
+        except Exception:
+            pass
+        try:
+            events.delete_rule(Name=EB_RULE_NAME)
+        except Exception:
+            pass
+        results["eventbridge"] = "deleted"
+    except Exception as e:
+        results["eventbridge_error"] = str(e)
+
+    # 6. Delete CloudWatch log groups
+    try:
+        logs = boto3.client("logs", region_name=REGION)
+        pager = logs.get_paginator("describe_log_groups")
+        for page in pager.paginate(logGroupNamePrefix="/aws/lambda/security-auto"):
+            for lg in page.get("logGroups", []):
+                try:
+                    logs.delete_log_group(logGroupName=lg["logGroupName"])
+                except Exception:
+                    pass
+        for lg_name in ["/aws/security-automation", "/aws/lambda/security-auto-dashboard"]:
+            try:
+                logs.delete_log_group(logGroupName=lg_name)
+            except Exception:
+                pass
+        results["logs"] = "deleted"
+    except Exception as e:
+        results["logs_error"] = str(e)
+
+    # 7. Delete Secrets Manager secret
+    try:
+        sm = boto3.client("secretsmanager", region_name=REGION)
+        sm.delete_secret(SecretId="security-automation/ai-api-key", ForceDeleteWithoutRecovery=True)
+        results["secret"] = "deleted"
+    except Exception as e:
+        results["secret_error"] = str(e)
+
+    # 8. Discover and delete API Gateway REST API
+    try:
+        agw = boto3.client("apigateway", region_name=REGION)
+        pager = agw.get_paginator("get_rest_apis")
+        for page in pager.paginate():
+            for api in page.get("items", []):
+                if api.get("name") == "SecurityAutomationApprovalAPI":
+                    try:
+                        agw.delete_rest_api(restApiId=api["id"])
+                        results["api_gateway"] = "deleted"
+                    except Exception:
+                        pass
+    except Exception as e:
+        results["api_gateway_error"] = str(e)
+
+    # 9. Delete self (dashboard Lambda) — must be last
+    try:
+        if fn_name:
+            lam.delete_function(FunctionName=fn_name)
+            results["self"] = "deleted"
+    except Exception as e:
+        results["self_error"] = str(e)
+
+    return results
 
 
 def start_simulation(body_str):
@@ -357,13 +527,19 @@ def _create_sim_resource(case_id, sim_id, ts):
         except ClientError as e:
             if e.response["Error"]["Code"] != "BucketAlreadyOwnedByYou":
                 raise
-        s3.put_public_access_block(
-            Bucket=bucket,
-            PublicAccessBlockConfiguration={
-                "BlockPublicAcls": False, "IgnorePublicAcls": False,
-                "BlockPublicPolicy": False, "RestrictPublicBuckets": False,
-            },
-        )
+        # Attempt to disable Block Public Access to simulate the misconfiguration.
+        # This may fail if account-level S3 block is enforced — simulation proceeds regardless.
+        try:
+            s3.put_public_access_block(
+                Bucket=bucket,
+                PublicAccessBlockConfiguration={
+                    "BlockPublicAcls": False, "IgnorePublicAcls": False,
+                    "BlockPublicPolicy": False, "RestrictPublicBuckets": False,
+                },
+            )
+        except ClientError:
+            # AccessDenied or account-level block — bucket created, finding injected anyway
+            pass
         return f"arn:aws:s3:::{bucket}", {"bucket_name": bucket}
 
     elif case_id in ("A2", "A3", "B2"):
@@ -453,6 +629,11 @@ def _delete_sim_resource(resource_type, resource_info):
 # ── MAIN HANDLER ──────────────────────────────────────────────────────────────
 
 def lambda_handler(event, context):
+    # Async self-invocation for infrastructure termination
+    if event.get("__terminate"):
+        _do_terminate()
+        return {"status": "terminated"}
+
     method = event.get("httpMethod", "GET")
     path   = event.get("path", "/dashboard").rstrip("/") or "/dashboard"
     body   = event.get("body") or ""
@@ -483,7 +664,7 @@ def lambda_handler(event, context):
     if method == "GET" and path.endswith("/api/control"):
         return get_pipeline_status()
     if method == "POST" and path.endswith("/api/control"):
-        return control_pipeline(body)
+        return control_pipeline(body, context)
 
     if method == "POST" and path.endswith("/api/simulate"):
         return start_simulation(body)

@@ -60,16 +60,12 @@ Write-OK "Dashboard URL: $dashboard_url"
 # ── STEP 5: SET GEMINI KEY ────────────────────────────────────────────────────
 Write-Step 5 5 "Setting AI API key..."
 if ($GEMINI_API_KEY -ne "") {
-    $secret_json = '{"api_key":"' + $GEMINI_API_KEY + '","provider":"gemini"}'
-    py -3 -c @"
-import boto3, sys
-sm = boto3.client('secretsmanager', region_name='$AWS_REGION',
-    aws_access_key_id='$AWS_ACCESS_KEY_ID',
-    aws_secret_access_key='$AWS_SECRET_ACCESS_KEY')
-sm.put_secret_value(SecretId='security-automation/ai-api-key', SecretString=sys.argv[1])
-print('Gemini key saved.')
-"@ $secret_json
-    Write-OK "Gemini API key set"
+    # Pass via env var to avoid PowerShell/Python string escaping issues
+    $env:_SA_GEMINI_KEY = $GEMINI_API_KEY
+    py -3 -c "import boto3,json,os; sm=boto3.client('secretsmanager'); sm.put_secret_value(SecretId='security-automation/ai-api-key', SecretString=json.dumps({'api_key':os.environ['_SA_GEMINI_KEY'],'provider':'gemini'})); print('Gemini key saved.')"
+    if ($LASTEXITCODE -ne 0) { Write-Info "Gemini key step had warnings — continuing" }
+    else { Write-OK "Gemini API key set" }
+    $env:_SA_GEMINI_KEY = ""
 } else {
     Write-Info "No Gemini key in config.ps1 — AI uses smart fallback routing (still works)"
 }

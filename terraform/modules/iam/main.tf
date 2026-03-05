@@ -382,6 +382,22 @@ data "aws_iam_policy_document" "lambda_dashboard_policy" {
     ]
     resources = ["arn:aws:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:log-group:/aws/lambda/security-auto-dashboard:*"]
   }
+
+  statement {
+    sid    = "TerminateInfrastructure"
+    effect = "Allow"
+    actions = [
+      "lambda:InvokeFunction", "lambda:DeleteFunction", "lambda:ListFunctions",
+      "states:StopExecution", "states:ListExecutions",
+      "dynamodb:DeleteTable", "dynamodb:BatchWriteItem",
+      "sns:DeleteTopic", "sns:Unsubscribe", "sns:ListSubscriptionsByTopic",
+      "events:RemoveTargets", "events:DeleteRule", "events:ListTargetsByRule",
+      "logs:DescribeLogGroups", "logs:DeleteLogGroup", "logs:DeleteLogStream",
+      "secretsmanager:DeleteSecret",
+      "apigateway:GET", "apigateway:DELETE",
+    ]
+    resources = ["*"]
+  }
 }
 
 resource "aws_iam_role_policy" "lambda_dashboard" {
