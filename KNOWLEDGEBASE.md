@@ -8,8 +8,9 @@
 5. VS Code errors = Terraform LS cache issue, not real. Fix: Ctrl+Shift+P → Terraform: Restart Language Server
 6. NO Lambda Layers needed — all Python uses stdlib + boto3 only (Gemini/Claude via urllib.request)
 7. Archive provider: hashicorp/archive ~> 2.4 (already in providers.tf)
+8. CI GitHub Actions runs `terraform fmt -check -recursive` — always run `terraform fmt -recursive` before committing
 
-## Current Stage: Stage 5 — SNS + API Gateway (NEXT TO BUILD)
+## ✅ PROJECT COMPLETE — All 11 Stages Done
 
 ---
 
@@ -22,12 +23,12 @@
 | 2 | Security Hub + Config | ✅ | e84f697 |
 | 3 | CloudWatch | ✅ | c7d498f |
 | 4 | Lambda (7 functions) | ✅ | adedb14 |
-| 5 | SNS + API Gateway | 🔲 NEXT | — |
-| 6 | Step Functions | 🔲 | — |
-| 7 | EventBridge | 🔲 | — |
-| 8 | Simulation Module | 🔲 | — |
-| 9 | MTTR Docs | 🔲 | — |
-| 10 | Scripts + Polish | 🔲 | — |
+| 5 | SNS + API Gateway | ✅ | 48c6472 |
+| 6 | Step Functions | ✅ | 95fa43f |
+| 7 | EventBridge | ✅ | 95fa43f |
+| 8 | Simulation Module | ✅ | 95fa43f |
+| 9 | MTTR Docs | ✅ | fc4591b |
+| 10 | Scripts + Polish | ✅ | fc4591b |
 
 ---
 
@@ -39,14 +40,14 @@
 | module.budget | ./modules/budget | (no outputs) ✅ |
 | module.security_hub | ./modules/security-hub | (no outputs) ✅ |
 | module.cloudwatch | ./modules/cloudwatch | log_group_name ✅ |
-| module.sns | ./modules/sns | admin_alerts_topic_arn (stub "") |
+| module.sns | ./modules/sns | admin_alerts_topic_arn ✅ |
 | module.lambda_remediation | ./modules/lambda-remediation | s3/iam/vpc/verification ARNs ✅ |
 | module.lambda_ai_analyzer | ./modules/lambda-ai-analyzer | function_arn ✅ |
 | module.lambda_notification | ./modules/lambda-notification | function_arn ✅ |
 | module.lambda_approval | ./modules/lambda-approval | function_arn, function_name ✅ |
-| module.api_gateway | ./modules/api-gateway | base_url (stub "") |
-| module.step_functions | ./modules/step-functions | state_machine_arn (stub "") |
-| module.eventbridge | ./modules/eventbridge | (no outputs) |
+| module.api_gateway | ./modules/api-gateway | base_url ✅ |
+| module.step_functions | ./modules/step-functions | state_machine_arn ✅ |
+| module.eventbridge | ./modules/eventbridge | (no outputs) ✅ |
 
 ---
 
@@ -72,7 +73,7 @@
 
 ---
 
-## Stage 4 Key Design Decisions (Lambda)
+## Key Design Decisions
 
 - Python source only: stdlib + boto3, NO external packages, NO Lambda Layers
 - Gemini called via `urllib.request` REST POST to `generativelanguage.googleapis.com`
@@ -87,83 +88,8 @@
 - All playbooks: VALIDATE → SAFETY CHECK → LOG → EXECUTE → VERIFY → LOG (idempotent)
 - Approval handler: GET /approve?token=TOKEN&action=N, /reject?token=TOKEN, /manual?token=TOKEN
 - Task token URL-encoded into approval links by send_notification.py
-
----
-
-## Stage 5 — What to Build
-
-### SNS Module (`terraform/modules/sns/main.tf`)
-- `aws_sns_topic` named `security-automation-admin-alerts`
-- `aws_sns_topic_subscription` — email protocol, endpoint = var.admin_email
-- Output: `admin_alerts_topic_arn`
-
-### API Gateway Module (`terraform/modules/api-gateway/main.tf`)
-- REST API named `SecurityAutomationApprovalAPI`
-- Resources: `/approve` GET, `/reject` GET, `/manual` GET
-- Integration: Lambda proxy to `security-auto-approval-handler`
-- Stage: `prod`
-- Lambda permission: allow API GW to invoke the approval Lambda
-- Output: `base_url` = `https://{id}.execute-api.us-east-1.amazonaws.com/prod`
-
----
-
-## Stage 6 — What to Build (Step Functions)
-
-### State Machine ASL (`terraform/modules/step-functions/state-machine.asl.json`)
-Flow:
-1. ParseFinding → LogFindingReceived
-2. AIAnalysis (Lambda: ai-analyzer)
-3. Choice: is_false_positive? → SuppressFinding → END
-4. Choice: safe_to_auto_remediate?
-   - YES → DetermineResourceType → Choice(S3/IAM/VPC) → Remediate* → VerifyRemediation → UpdateSecurityHub → END
-   - NO → NotifyAdmin → WaitForApproval (heartbeat callback, 1hr timeout)
-     - APPROVED → ExecuteApprovedPlaybook → VerifyRemediation → UpdateSecurityHub → END
-     - REJECTED → SuppressFinding → END
-     - TIMEOUT → LogTimeout → NotifyAdminTimeout → END
-5. Catch all errors → HandleError → END
-
-### Step Functions Terraform (`terraform/modules/step-functions/main.tf`)
-- `aws_sfn_state_machine` named `SecurityRemediationStateMachine`
-- Type: STANDARD
-- CW logging enabled (ALL level)
-- Definition from `templatefile("state-machine.asl.json", {...lambda ARNs...})`
-
----
-
-## Stage 7 — EventBridge Rule
-
-File: `terraform/modules/eventbridge/main.tf`
-- Rule: `securityhub-finding-rule`
-- Event pattern:
-```json
-{
-  "source": ["aws.securityhub"],
-  "detail-type": ["Security Hub Findings - Imported"],
-  "detail": {
-    "findings": {
-      "Compliance": {"Status": ["FAILED"]},
-      "Workflow": {"Status": ["NEW"]},
-      "Severity": {"Label": ["MEDIUM", "HIGH", "CRITICAL"]},
-      "RecordState": ["ACTIVE"]
-    }
-  }
-}
-```
-- Target: Step Functions state machine ARN
-- Role: EventBridge IAM role
-
----
-
-## Stage 8 — Simulation Module
-
-File: `terraform/simulation/main.tf`
-Resources (all tagged Environment=Test for Category A):
-- A1: S3 bucket with public-read ACL (`secauto-test-public-{random4}`)
-- A2: SG with SSH port 22 open to 0.0.0.0/0 (`secauto-test-open-ssh`)
-- A3: SG with ALL traffic from 0.0.0.0/0 (`secauto-test-open-all`)
-- B1: IAM user + active key + AdministratorAccess (`secauto-test-risky-user`, tagged Role=CI-Pipeline)
-- B2: SG with RDP 3389 open, tagged Environment=Production (`secauto-test-open-rdp`)
-- FP: S3 bucket with public-read ACL BUT tagged PublicAccess=Intentional,Purpose=StaticWebsite (`secauto-test-fp-website-{random4}`)
+- Step Functions waitForTaskToken with HeartbeatSeconds=3600 (1-hour timeout)
+- Simulation: standalone Terraform root in `terraform/simulation/` — `terraform -chdir=terraform/simulation apply`
 
 ---
 
@@ -176,5 +102,49 @@ aws secretsmanager put-secret-value `
   --secret-id security-automation/ai-api-key `
   --secret-string '{"api_key":"YOUR_GEMINI_KEY_HERE","provider":"gemini"}'
 ```
-3. **Verify**: Run `terraform plan` → should show 0 changes
+3. **Deploy simulation**: `.\scripts\demo.ps1`
+4. **Verify**: Run `terraform plan` → should show 0 changes
 
+---
+
+## File Map (key files)
+
+```
+terraform/
+  main.tf                          # Root wiring all 12 modules
+  providers.tf                     # aws ~>5.0, random ~>3.5, archive ~>2.4
+  variables.tf                     # admin_email (required), aws_region, ai_provider, ai_model
+  modules/
+    iam/main.tf                    # 7 IAM roles
+    budget/main.tf                 # $1/mo budget alert
+    security-hub/main.tf           # FSBP + CIS + Config recorder
+    cloudwatch/main.tf             # Log group + dashboard + 2 alarms
+    sns/main.tf                    # SNS topic + email subscription
+    api-gateway/main.tf            # REST API /approve /reject /manual → approval Lambda
+    lambda-remediation/src/        # s3_remediation.py, iam_remediation.py, vpc_remediation.py, verification.py, utils.py
+    lambda-ai-analyzer/src/        # ai_analyzer.py, response_validator.py, infrastructure_context.py, providers/
+    lambda-notification/src/       # send_notification.py
+    lambda-approval/src/           # approval_handler.py
+    step-functions/
+      state-machine.asl.json       # Full ASL with templatefile placeholders
+      main.tf                      # aws_sfn_state_machine + CW log group
+    eventbridge/main.tf            # securityhub-finding-rule → Step Functions
+  simulation/
+    main.tf                        # 6 demo misconfigurations
+    outputs.tf                     # bucket names, SG IDs for verification
+scripts/
+  deploy.ps1                       # Full stack deploy
+  destroy.ps1                      # Full teardown
+  demo.ps1                         # Deploy/destroy simulation resources
+  pause-project.ps1                # Disable EventBridge (cost saving)
+  resume-project.ps1               # Re-enable EventBridge
+docs/
+  architecture.md                  # System design + flow diagram
+  manual-vs-auto-mttr.md          # MTTR analysis (88% reduction)
+  demo-guide.md                    # Step-by-step demo instructions
+  judge-qa.md                      # Evaluator Q&A preparation
+  cost-log.md                      # Monthly cost breakdown (~$0.70)
+tests/
+  test_response_validator.py       # Safety override unit tests
+README.md                          # Project overview + quick start
+```
