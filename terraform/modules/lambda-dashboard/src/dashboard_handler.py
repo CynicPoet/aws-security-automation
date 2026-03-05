@@ -238,7 +238,7 @@ def update_ai_config(body_str):
 def fetch_ai_models(body_str):
     """
     Validate an API key against the chosen provider and return the list of usable models.
-    Body: { provider, api_key }
+    Body: { provider, api_key? }  — api_key optional: uses stored Secrets Manager key if omitted.
     """
     body = parse_body(body_str)
     if body is None:
@@ -246,8 +246,13 @@ def fetch_ai_models(body_str):
 
     provider = body.get("provider", "gemini").lower()
     api_key  = body.get("api_key", "").strip()
+
+    # If no key provided, try to load from Secrets Manager
     if not api_key:
-        return respond(400, {"error": "api_key required"})
+        api_key = _get_ai_api_key() or ""
+
+    if not api_key:
+        return respond(400, {"error": "No API key provided and no stored key found"})
 
     if provider == "gemini":
         return _fetch_gemini_models(api_key)
@@ -327,6 +332,525 @@ def _validate_claude_key(api_key: str):
         return respond(200, {"valid": True, "models": CLAUDE_MODELS})
     except urllib.error.URLError as exc:
         return respond(502, {"error": f"Network error: {exc.reason}"})
+
+
+# ── AI DIRECT CALL HELPERS ─────────────────────────────────────────────────────
+
+def _get_ai_api_key():
+    """Retrieve AI API key from Secrets Manager. Returns None if not configured."""
+    try:
+        sm = boto3.client("secretsmanager", region_name=REGION)
+        resp = sm.get_secret_value(SecretId=AI_SECRET_NAME)
+        secret = json.loads(resp["SecretString"])
+        key = secret.get("api_key", "")
+        return key if key and "REPLACE_WITH" not in key else None
+    except Exception:
+        return None
+
+
+def _call_ai_direct(prompt: str, max_tokens: int = 900):
+    """Call configured AI provider directly. Returns (text, error_str)."""
+    provider = _get_setting("ai_provider", "gemini")
+    model    = _get_setting("ai_model", "gemini-2.0-flash")
+    api_key  = _get_ai_api_key()
+    if not api_key:
+        return None, "AI API key not configured in Secrets Manager"
+    if provider == "claude":
+        return _call_claude_raw(api_key, model, prompt, max_tokens)
+    return _call_gemini_raw(api_key, model, prompt, max_tokens)
+
+
+def _call_gemini_raw(api_key, model, prompt, max_tokens):
+    """Call Gemini API with automatic model fallback on 429. Returns (text, error)."""
+    chain = [model] + [m for m in ("gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash") if m != model]
+    for m in chain:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={api_key}"
+        payload = json.dumps({
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0, "responseMimeType": "application/json"},
+            "safetySettings": [{"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}],
+        }).encode()
+        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                body = json.loads(r.read().decode())
+            return body["candidates"][0]["content"]["parts"][0]["text"].strip(), None
+        except urllib.error.HTTPError as exc:
+            err = exc.read().decode()[:200]
+            if exc.code == 429 or exc.code == 404 or "RESOURCE_EXHAUSTED" in err:
+                continue
+            return None, f"Gemini HTTP {exc.code}: {err}"
+        except Exception as exc:
+            return None, f"Gemini error: {exc}"
+    return None, "All Gemini models exhausted"
+
+
+def _call_claude_raw(api_key, model, prompt, max_tokens):
+    """Call Claude API directly. Returns (text, error)."""
+    payload = json.dumps({
+        "model": model, "max_tokens": max_tokens, "temperature": 0,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode()
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages", data=payload,
+        headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            body = json.loads(r.read().decode())
+        return body["content"][0]["text"].strip(), None
+    except urllib.error.HTTPError as exc:
+        return None, f"Claude HTTP {exc.code}: {exc.read().decode()[:200]}"
+    except Exception as exc:
+        return None, f"Claude error: {exc}"
+
+
+# ── RUNBOOK ─────────────────────────────────────────────────────────────────────
+
+_RUNBOOK_PROMPT = """AWS security remediation expert. Return ONLY valid JSON — no markdown, no preamble.
+
+SECURITY FINDING:
+{finding_json}
+
+CURRENT AWS RESOURCE STATE:
+{state_json}
+
+AVAILABLE BOTO3 OPERATIONS (only use these):
+{available_ops}
+
+Generate a precise remediation runbook. Return this JSON exactly:
+{{"summary":"one sentence what will be changed","risk_level":"LOW","estimated_impact":"effect on live services","steps":[{{"n":1,"title":"step title","action":"what boto3 will do","api_call":"exact_client.method(exact_args)","expected":"what changes"}}],"rollback":[{{"n":1,"title":"undo title","action":"how to undo","api_call":"exact_client.method(exact_args)"}}],"warnings":["edge cases or cautions"]}}"""
+
+_AVAILABLE_OPS = {
+    "S3":  "s3.put_bucket_public_access_block(Bucket='NAME', PublicAccessBlockConfiguration={'BlockPublicAcls':True,'IgnorePublicAcls':True,'BlockPublicPolicy':True,'RestrictPublicBuckets':True})",
+    "EC2": "ec2.revoke_security_group_ingress(GroupId='SG_ID', IpPermissions=[<each_open_rule_from_current_state>])",
+    "IAM": "iam.update_access_key(UserName='USER', AccessKeyId='KEY_ID', Status='Inactive') — once per Active key",
+}
+
+
+def _get_resource_state_for_runbook(resource_type: str, resource_id: str) -> dict:
+    """Fetch minimal current resource state for AI runbook context."""
+    state = {"resource_type": resource_type, "resource_id": resource_id}
+    try:
+        if "S3" in resource_type:
+            bucket = resource_id.split(":::")[-1].split("/")[0]
+            state["bucket_name"] = bucket
+            try:
+                r = s3.get_public_access_block(Bucket=bucket)
+                state["current_public_access_block"] = r.get("PublicAccessBlockConfiguration", {})
+            except ClientError as e:
+                state["current_public_access_block"] = {"note": e.response["Error"]["Code"]}
+
+        elif "SecurityGroup" in resource_type or "Ec2" in resource_type:
+            sg_id = resource_id.split("/")[-1]
+            state["sg_id"] = sg_id
+            try:
+                r = ec2.describe_security_groups(GroupIds=[sg_id])
+                sg = r["SecurityGroups"][0]
+                state["sg_name"] = sg.get("GroupName", "")
+                state["tags"] = {t["Key"]: t["Value"] for t in sg.get("Tags", [])}
+                open_rules = []
+                for perm in sg.get("IpPermissions", []):
+                    for rng in perm.get("IpRanges", []) + perm.get("Ipv6Ranges", []):
+                        cidr = rng.get("CidrIp") or rng.get("CidrIpv6", "")
+                        if cidr in ("0.0.0.0/0", "::/0"):
+                            open_rules.append({
+                                "protocol": perm.get("IpProtocol", "-1"),
+                                "from_port": perm.get("FromPort", 0),
+                                "to_port": perm.get("ToPort", 65535),
+                                "cidr": cidr,
+                            })
+                state["open_ingress_rules"] = open_rules
+            except ClientError as e:
+                state["error"] = e.response["Error"]["Code"]
+
+        elif "Iam" in resource_type or "iam" in resource_type.lower():
+            username = resource_id.split("/")[-1]
+            state["username"] = username
+            try:
+                keys = iam.list_access_keys(UserName=username)
+                state["access_keys"] = [
+                    {"id": k["AccessKeyId"][:8] + "...", "status": k["Status"]}
+                    for k in keys.get("AccessKeyMetadata", [])
+                ]
+                tags = iam.list_user_tags(UserName=username)
+                state["tags"] = {t["Key"]: t["Value"] for t in tags.get("Tags", [])}
+            except ClientError as e:
+                state["error"] = e.response["Error"]["Code"]
+    except Exception as e:
+        state["fetch_error"] = str(e)
+    return state
+
+
+def generate_runbook(body_str):
+    body = parse_body(body_str)
+    if body is None:
+        return respond(400, {"error": "Invalid JSON"})
+    finding_id = body.get("finding_id", "")
+    if not finding_id:
+        return respond(400, {"error": "finding_id required"})
+
+    result = findings_table.get_item(Key={"finding_id": finding_id})
+    item = result.get("Item")
+    if not item:
+        return respond(404, {"error": "Finding not found"})
+
+    resource_type = item.get("resource_type", "")
+    resource_id   = item.get("resource_id", "")
+
+    ops_key = "EC2" if ("SecurityGroup" in resource_type or "Ec2" in resource_type) else \
+              "IAM" if ("Iam" in resource_type or "iam" in resource_type.lower()) else \
+              "S3"  if "S3" in resource_type else None
+
+    if not ops_key:
+        return respond(400, {"error": f"No automated remediation available for resource type: {resource_type}"})
+
+    current_state = _get_resource_state_for_runbook(resource_type, resource_id)
+
+    finding_summary = {
+        "resource_type": resource_type,
+        "resource_id": resource_id,
+        "severity": item.get("severity", ""),
+        "title": item.get("title", ""),
+        "description": item.get("description", ""),
+        "ai_analysis": item.get("ai_analysis", ""),
+    }
+
+    prompt = _RUNBOOK_PROMPT.format(
+        finding_json=json.dumps(finding_summary, default=str),
+        state_json=json.dumps(current_state, default=str),
+        available_ops=_AVAILABLE_OPS[ops_key],
+    )
+
+    text, err = _call_ai_direct(prompt, max_tokens=900)
+    if err:
+        return respond(500, {"error": f"AI call failed: {err}"})
+
+    try:
+        runbook = json.loads(text)
+    except json.JSONDecodeError:
+        try:
+            runbook = json.loads(text[text.index("{"):text.rindex("}") + 1])
+        except Exception:
+            return respond(500, {"error": f"AI returned invalid JSON: {text[:300]}"})
+
+    try:
+        findings_table.update_item(
+            Key={"finding_id": finding_id},
+            UpdateExpression="SET runbook = :r, runbook_status = :s, runbook_generated_at = :t",
+            ExpressionAttributeValues={
+                ":r": json.dumps(runbook, default=str),
+                ":s": "READY",
+                ":t": now_iso(),
+            },
+        )
+    except Exception as e:
+        return respond(500, {"error": f"Failed to store runbook: {e}"})
+
+    provider = _get_setting("ai_provider", "gemini")
+    model    = _get_setting("ai_model", "gemini-2.0-flash")
+    return respond(200, {"runbook": runbook, "provider": provider, "model": model})
+
+
+def apply_runbook(body_str):
+    body = parse_body(body_str)
+    if body is None:
+        return respond(400, {"error": "Invalid JSON"})
+    finding_id = body.get("finding_id", "")
+    if not finding_id:
+        return respond(400, {"error": "finding_id required"})
+
+    result = findings_table.get_item(Key={"finding_id": finding_id})
+    item = result.get("Item")
+    if not item:
+        return respond(404, {"error": "Finding not found"})
+    if not item.get("runbook"):
+        return respond(400, {"error": "No runbook generated yet — generate runbook first"})
+
+    resource_type = item.get("resource_type", "")
+    resource_id   = item.get("resource_id", "")
+    logs = []
+    success = False
+    undo_data = {}
+
+    try:
+        if "S3" in resource_type:
+            success, undo_data, logs = _apply_s3_block(resource_id, logs)
+        elif "SecurityGroup" in resource_type or "Ec2" in resource_type:
+            success, undo_data, logs = _apply_sg_revoke(resource_id, logs)
+        elif "Iam" in resource_type or "iam" in resource_type.lower():
+            success, undo_data, logs = _apply_iam_disable(resource_id, logs)
+        else:
+            logs.append(f"ERROR: No inline remediation available for: {resource_type}")
+    except Exception as e:
+        logs.append(f"EXCEPTION: {e}")
+
+    new_status = "RUNBOOK_APPLIED" if success else "RUNBOOK_FAILED"
+    findings_table.update_item(
+        Key={"finding_id": finding_id},
+        UpdateExpression="SET runbook_status = :rs, runbook_logs = :l, undo_data = :u, runbook_applied_at = :t, #st = :fs",
+        ExpressionAttributeNames={"#st": "status"},
+        ExpressionAttributeValues={
+            ":rs": new_status,
+            ":l": json.dumps(logs, default=str),
+            ":u": json.dumps(undo_data, default=str),
+            ":t": now_iso(),
+            ":fs": "RESOLVED" if success else item.get("status", "PENDING_APPROVAL"),
+        },
+    )
+    return respond(200, {
+        "success": success,
+        "runbook_status": new_status,
+        "logs": logs,
+        "can_undo": success and bool(undo_data),
+    })
+
+
+def undo_runbook(body_str):
+    body = parse_body(body_str)
+    if body is None:
+        return respond(400, {"error": "Invalid JSON"})
+    finding_id = body.get("finding_id", "")
+    if not finding_id:
+        return respond(400, {"error": "finding_id required"})
+
+    result = findings_table.get_item(Key={"finding_id": finding_id})
+    item = result.get("Item")
+    if not item:
+        return respond(404, {"error": "Finding not found"})
+
+    undo_str = item.get("undo_data", "{}")
+    try:
+        undo_data = json.loads(undo_str) if isinstance(undo_str, str) else (undo_str or {})
+    except Exception:
+        return respond(400, {"error": "Invalid undo data"})
+
+    if not undo_data:
+        return respond(400, {"error": "No undo data available — cannot undo this remediation"})
+
+    resource_type = item.get("resource_type", "")
+    logs = []
+    success = False
+
+    try:
+        if "S3" in resource_type:
+            success, logs = _undo_s3_block(undo_data, logs)
+        elif "SecurityGroup" in resource_type or "Ec2" in resource_type:
+            success, logs = _undo_sg_revoke(undo_data, logs)
+        elif "Iam" in resource_type or "iam" in resource_type.lower():
+            success, logs = _undo_iam_disable(undo_data, logs)
+        else:
+            logs.append(f"ERROR: Cannot undo resource type: {resource_type}")
+    except Exception as e:
+        logs.append(f"EXCEPTION during undo: {e}")
+
+    if success:
+        findings_table.update_item(
+            Key={"finding_id": finding_id},
+            UpdateExpression="SET runbook_status = :rs, runbook_logs = :l, undo_data = :u, #st = :fs",
+            ExpressionAttributeNames={"#st": "status"},
+            ExpressionAttributeValues={
+                ":rs": "UNDONE",
+                ":l": json.dumps(logs, default=str),
+                ":u": json.dumps({}),
+                ":fs": "PENDING_APPROVAL",
+            },
+        )
+    return respond(200, {"success": success, "logs": logs})
+
+
+# ── INLINE REMEDIATION HELPERS ─────────────────────────────────────────────────
+
+def _apply_s3_block(resource_id, logs):
+    bucket = resource_id.split(":::")[-1].split("/")[0]
+    logs.append(f"[S3] Target bucket: {bucket}")
+    undo_data = {"type": "s3", "bucket": bucket, "original": {}}
+    try:
+        r = s3.get_public_access_block(Bucket=bucket)
+        undo_data["original"] = r.get("PublicAccessBlockConfiguration", {})
+        logs.append(f"[S3] Pre-state captured: {undo_data['original']}")
+    except ClientError as e:
+        logs.append(f"[S3] Could not capture pre-state: {e.response['Error']['Code']}")
+    try:
+        s3.put_bucket_public_access_block(
+            Bucket=bucket,
+            PublicAccessBlockConfiguration={
+                "BlockPublicAcls": True, "IgnorePublicAcls": True,
+                "BlockPublicPolicy": True, "RestrictPublicBuckets": True,
+            },
+        )
+        logs.append("[S3] \u2713 Applied: all public access blocked (BlockPublicAcls, IgnorePublicAcls, BlockPublicPolicy, RestrictPublicBuckets = True)")
+    except ClientError as e:
+        logs.append(f"[S3] \u2717 Failed: {e.response['Error']['Code']}: {e.response['Error']['Message']}")
+        return False, undo_data, logs
+    try:
+        r = s3.get_public_access_block(Bucket=bucket)
+        cfg = r.get("PublicAccessBlockConfiguration", {})
+        if all(cfg.get(k) for k in ("BlockPublicAcls", "IgnorePublicAcls", "BlockPublicPolicy", "RestrictPublicBuckets")):
+            logs.append("[S3] \u2713 Verified: all public access blocked")
+            return True, undo_data, logs
+        logs.append(f"[S3] \u2717 Verification failed: {cfg}")
+        return False, undo_data, logs
+    except ClientError:
+        logs.append("[S3] \u2713 Applied (verification skipped)")
+        return True, undo_data, logs
+
+
+def _apply_sg_revoke(resource_id, logs):
+    sg_id = resource_id.split("/")[-1]
+    logs.append(f"[SG] Target: {sg_id}")
+    undo_data = {"type": "sg", "sg_id": sg_id, "revoked_rules": []}
+    try:
+        r = ec2.describe_security_groups(GroupIds=[sg_id])
+        sg = r["SecurityGroups"][0]
+    except ClientError as e:
+        logs.append(f"[SG] \u2717 Cannot describe SG: {e.response['Error']['Code']}")
+        return False, undo_data, logs
+
+    rules_to_revoke = []
+    for perm in sg.get("IpPermissions", []):
+        open_v4 = [x for x in perm.get("IpRanges", []) if x.get("CidrIp") in ("0.0.0.0/0",)]
+        open_v6 = [x for x in perm.get("Ipv6Ranges", []) if x.get("CidrIpv6") == "::/0"]
+        if open_v4 or open_v6:
+            rule = {"IpProtocol": perm.get("IpProtocol", "-1")}
+            if perm.get("FromPort") is not None:
+                rule["FromPort"] = perm["FromPort"]
+                rule["ToPort"]   = perm["ToPort"]
+            if open_v4:
+                rule["IpRanges"] = open_v4
+            if open_v6:
+                rule["Ipv6Ranges"] = open_v6
+            rules_to_revoke.append(rule)
+            port_str = f":{perm.get('FromPort',0)}-{perm.get('ToPort',65535)}" if perm.get("FromPort") is not None else ":all"
+            logs.append(f"[SG] Found open rule: {perm.get('IpProtocol','-1')}{port_str} from 0.0.0.0/0")
+
+    if not rules_to_revoke:
+        logs.append("[SG] No unrestricted ingress rules found — already clean")
+        return True, undo_data, logs
+
+    undo_data["revoked_rules"] = rules_to_revoke
+    try:
+        ec2.revoke_security_group_ingress(GroupId=sg_id, IpPermissions=rules_to_revoke)
+        logs.append(f"[SG] \u2713 Revoked {len(rules_to_revoke)} unrestricted ingress rule(s)")
+    except ClientError as e:
+        logs.append(f"[SG] \u2717 Revoke failed: {e.response['Error']['Code']}: {e.response['Error']['Message']}")
+        return False, undo_data, logs
+
+    try:
+        r = ec2.describe_security_groups(GroupIds=[sg_id])
+        still_open = [
+            rng.get("CidrIp") or rng.get("CidrIpv6", "")
+            for perm in r["SecurityGroups"][0].get("IpPermissions", [])
+            for rng in perm.get("IpRanges", []) + perm.get("Ipv6Ranges", [])
+            if (rng.get("CidrIp") or rng.get("CidrIpv6", "")) in ("0.0.0.0/0", "::/0")
+        ]
+        if still_open:
+            logs.append(f"[SG] \u2717 Verification: {len(still_open)} open rule(s) remaining")
+            return False, undo_data, logs
+        logs.append("[SG] \u2713 Verified: no unrestricted ingress rules remaining")
+    except ClientError:
+        logs.append("[SG] \u2713 Applied (verification skipped)")
+    return True, undo_data, logs
+
+
+def _apply_iam_disable(resource_id, logs):
+    username = resource_id.split("/")[-1]
+    logs.append(f"[IAM] Target user: {username}")
+    undo_data = {"type": "iam", "username": username, "disabled_keys": []}
+    try:
+        keys = iam.list_access_keys(UserName=username)
+        active_keys = [k["AccessKeyId"] for k in keys.get("AccessKeyMetadata", []) if k["Status"] == "Active"]
+    except ClientError as e:
+        logs.append(f"[IAM] \u2717 Cannot list access keys: {e.response['Error']['Code']}")
+        return False, undo_data, logs
+
+    if not active_keys:
+        logs.append("[IAM] No active access keys — already clean")
+        return True, undo_data, logs
+
+    disabled = []
+    for key_id in active_keys:
+        try:
+            iam.update_access_key(UserName=username, AccessKeyId=key_id, Status="Inactive")
+            logs.append(f"[IAM] \u2713 Disabled key: {key_id[:12]}...")
+            disabled.append(key_id)
+        except ClientError as e:
+            logs.append(f"[IAM] \u2717 Failed to disable {key_id[:12]}...: {e.response['Error']['Code']}")
+
+    undo_data["disabled_keys"] = disabled
+    if not disabled:
+        return False, undo_data, logs
+
+    try:
+        keys = iam.list_access_keys(UserName=username)
+        still_active = [k for k in keys.get("AccessKeyMetadata", []) if k["Status"] == "Active"]
+        if still_active:
+            logs.append(f"[IAM] \u2717 Verification: {len(still_active)} key(s) still Active")
+        else:
+            logs.append("[IAM] \u2713 Verified: all access keys Inactive")
+    except ClientError:
+        logs.append("[IAM] \u2713 Applied (verification skipped)")
+
+    return len(disabled) == len(active_keys), undo_data, logs
+
+
+def _undo_s3_block(undo_data, logs):
+    bucket   = undo_data.get("bucket")
+    original = undo_data.get("original") or {"BlockPublicAcls": False, "IgnorePublicAcls": False, "BlockPublicPolicy": False, "RestrictPublicBuckets": False}
+    if not bucket:
+        logs.append("ERROR: Missing bucket name in undo data")
+        return False, logs
+    logs.append(f"[UNDO S3] Restoring bucket: {bucket} to original state: {original}")
+    try:
+        s3.put_bucket_public_access_block(
+            Bucket=bucket,
+            PublicAccessBlockConfiguration={
+                "BlockPublicAcls":      original.get("BlockPublicAcls", False),
+                "IgnorePublicAcls":     original.get("IgnorePublicAcls", False),
+                "BlockPublicPolicy":    original.get("BlockPublicPolicy", False),
+                "RestrictPublicBuckets": original.get("RestrictPublicBuckets", False),
+            },
+        )
+        logs.append("[UNDO S3] \u2713 Restored original public access block settings")
+        return True, logs
+    except ClientError as e:
+        logs.append(f"[UNDO S3] \u2717 Failed: {e.response['Error']['Code']}: {e.response['Error']['Message']}")
+        return False, logs
+
+
+def _undo_sg_revoke(undo_data, logs):
+    sg_id   = undo_data.get("sg_id")
+    revoked = undo_data.get("revoked_rules", [])
+    if not sg_id or not revoked:
+        logs.append("ERROR: Missing sg_id or revoked_rules in undo data")
+        return False, logs
+    logs.append(f"[UNDO SG] Re-adding {len(revoked)} rule(s) to {sg_id}")
+    try:
+        ec2.authorize_security_group_ingress(GroupId=sg_id, IpPermissions=revoked)
+        logs.append(f"[UNDO SG] \u2713 Restored {len(revoked)} ingress rule(s)")
+        return True, logs
+    except ClientError as e:
+        logs.append(f"[UNDO SG] \u2717 Failed: {e.response['Error']['Code']}: {e.response['Error']['Message']}")
+        return False, logs
+
+
+def _undo_iam_disable(undo_data, logs):
+    username     = undo_data.get("username")
+    disabled_keys = undo_data.get("disabled_keys", [])
+    if not username or not disabled_keys:
+        logs.append("ERROR: Missing username or disabled_keys in undo data")
+        return False, logs
+    logs.append(f"[UNDO IAM] Re-enabling {len(disabled_keys)} key(s) for user: {username}")
+    re_enabled = 0
+    for key_id in disabled_keys:
+        try:
+            iam.update_access_key(UserName=username, AccessKeyId=key_id, Status="Active")
+            logs.append(f"[UNDO IAM] \u2713 Re-enabled: {key_id[:12]}...")
+            re_enabled += 1
+        except ClientError as e:
+            logs.append(f"[UNDO IAM] \u2717 Failed re-enable {key_id[:12]}...: {e.response['Error']['Code']}")
+    return re_enabled == len(disabled_keys), logs
 
 
 def take_action(body_str):
@@ -850,5 +1374,12 @@ def lambda_handler(event, context):
         return update_ai_config(body)
     if method == "POST" and path.endswith("/api/ai-models"):
         return fetch_ai_models(body)
+
+    if method == "POST" and path.endswith("/api/ai-runbook"):
+        return generate_runbook(body)
+    if method == "POST" and path.endswith("/api/apply-runbook"):
+        return apply_runbook(body)
+    if method == "POST" and path.endswith("/api/undo-runbook"):
+        return undo_runbook(body)
 
     return respond(404, {"error": f"Unknown route: {method} {path}"})

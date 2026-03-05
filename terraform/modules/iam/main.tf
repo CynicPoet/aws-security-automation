@@ -391,6 +391,18 @@ data "aws_iam_policy_document" "lambda_dashboard_policy" {
   }
 
   statement {
+    sid    = "RunbookExecution"
+    effect = "Allow"
+    actions = [
+      "s3:GetBucketPublicAccessBlock",
+      "s3:PutBucketPublicAccessBlock",
+      "iam:UpdateAccessKey",
+      "secretsmanager:GetSecretValue",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
     sid    = "TerminateInfrastructure"
     effect = "Allow"
     actions = [

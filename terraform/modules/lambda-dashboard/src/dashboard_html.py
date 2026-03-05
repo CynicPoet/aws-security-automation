@@ -321,6 +321,58 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         </div>
       </div>
 
+      <!-- AI Remediation Runbook -->
+      <div class="pt-4 border-t border-slate-700">
+        <div class="flex items-center justify-between mb-3">
+          <p class="text-xs text-indigo-400 uppercase tracking-widest font-semibold">&#x1F916; AI Remediation Runbook</p>
+          <button id="modal-gen-runbook-btn" onclick="generateRunbook()"
+            class="text-xs px-3 py-1.5 rounded-lg bg-indigo-900/60 hover:bg-indigo-800 text-indigo-300 border border-indigo-800 hover:border-indigo-600 transition-colors flex items-center gap-1.5">
+            &#x2728; Generate Runbook
+          </button>
+        </div>
+        <div id="modal-runbook-loading" class="hidden text-xs text-indigo-400 flex items-center gap-2 py-2">
+          <svg class="spin w-3 h-3 flex-shrink-0" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/></svg>
+          Calling AI to generate remediation runbook...
+        </div>
+        <div id="modal-runbook-content" class="hidden space-y-3">
+          <!-- Summary row -->
+          <div class="bg-slate-900/60 border border-slate-700 rounded-lg p-4">
+            <div class="flex items-center gap-3 mb-2 flex-wrap">
+              <span id="runbook-risk-badge" class="text-xs px-2 py-0.5 rounded font-semibold"></span>
+              <span id="runbook-summary" class="text-xs text-slate-200 flex-1"></span>
+            </div>
+            <p class="text-xs text-slate-500"><span class="text-slate-400">Impact: </span><span id="runbook-impact"></span></p>
+            <!-- Steps -->
+            <div id="runbook-steps" class="mt-3 space-y-2"></div>
+            <!-- Rollback accordion -->
+            <details class="mt-3">
+              <summary class="text-xs text-slate-500 cursor-pointer hover:text-slate-300 select-none">&#x21A9; View rollback plan</summary>
+              <div id="runbook-rollback" class="mt-2 pl-3 border-l border-slate-700 space-y-1"></div>
+            </details>
+            <!-- Warnings -->
+            <div id="runbook-warnings" class="hidden mt-2 space-y-1"></div>
+          </div>
+          <!-- Action row -->
+          <div class="flex gap-2">
+            <button id="runbook-apply-btn" onclick="applyRunbook()"
+              class="flex-1 py-2 rounded-lg text-xs font-semibold bg-emerald-900 hover:bg-emerald-800 text-emerald-200 border border-emerald-700 transition-colors">
+              &#x2713; Apply Remediation
+            </button>
+            <button id="runbook-undo-btn" onclick="undoRunbook()"
+              class="hidden px-4 py-2 rounded-lg text-xs font-semibold bg-orange-900 hover:bg-orange-800 text-orange-200 border border-orange-700 transition-colors">
+              &#x21A9; Undo
+            </button>
+          </div>
+          <!-- Execution logs -->
+          <div id="runbook-logs-section" class="hidden">
+            <details open>
+              <summary class="text-xs text-slate-500 cursor-pointer hover:text-slate-300 select-none">Execution Logs</summary>
+              <div id="runbook-logs" class="mt-2 bg-black/60 rounded-lg p-3 text-xs font-mono space-y-0.5 max-h-48 overflow-y-auto"></div>
+            </details>
+          </div>
+        </div>
+      </div>
+
       <!-- Footer -->
       <div class="pt-3 border-t border-slate-700 flex items-center justify-between gap-3">
         <button onclick="resendEmail()" id="modal-email-btn" class="text-xs text-indigo-400 hover:text-indigo-300 transition-colors">&#x2709; Resend email alert</button>
@@ -341,6 +393,7 @@ let emailEnabled = false;
 let autoRemediationEnabled = true;
 let pipelineState = 'UNKNOWN';
 let activeSim = null;
+let aiSessionKey = '';  // Cached API key for current browser session
 
 const API_BASE = window.location.origin + (window.location.pathname.startsWith('/prod') ? '/prod' : '');
 
@@ -848,6 +901,35 @@ function openModal(findingId) {
   // Footer
   document.getElementById('modal-footer-time').textContent = 'Detected ' + fmtTime(f.created_at);
 
+  // Runbook section — reset to initial state; restore if already applied/ready
+  _resetRunbookUI();
+  const runbookStr = f.runbook;
+  const runbookStatus = (f.runbook_status||'').toUpperCase();
+  if(runbookStr && runbookStatus && runbookStatus !== 'UNDONE') {
+    try {
+      const rb = typeof runbookStr === 'string' ? JSON.parse(runbookStr) : runbookStr;
+      renderRunbook(rb, '', '');
+      document.getElementById('modal-runbook-content').classList.remove('hidden');
+      document.getElementById('modal-gen-runbook-btn').textContent = '\u21BB Regenerate';
+      if(runbookStatus === 'RUNBOOK_APPLIED') {
+        document.getElementById('runbook-apply-btn').disabled = true;
+        document.getElementById('runbook-apply-btn').textContent = '\u2713 Applied';
+        document.getElementById('runbook-apply-btn').className = 'flex-1 py-2 rounded-lg text-xs font-semibold bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed';
+        document.getElementById('runbook-undo-btn').classList.remove('hidden');
+      }
+      if(runbookStatus === 'RUNBOOK_FAILED') {
+        document.getElementById('runbook-apply-btn').textContent = '\u21BB Retry Apply';
+      }
+      const logsStr = f.runbook_logs;
+      if(logsStr) {
+        try {
+          const logs = typeof logsStr === 'string' ? JSON.parse(logsStr) : logsStr;
+          if(logs && logs.length) renderRunbookLogs(logs, runbookStatus === 'RUNBOOK_APPLIED');
+        } catch(e) {}
+      }
+    } catch(e) {}
+  }
+
   document.getElementById('modal').classList.remove('hidden');
   document.body.style.overflow='hidden';
 }
@@ -934,6 +1016,149 @@ function fmtTimeFull(iso){
 function safeParse(v,fb){if(!v)return fb;if(typeof v==='object')return v;try{return JSON.parse(v)}catch{return fb}}
 function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
 
+// ── RUNBOOK ─────────────────────────────────────────────────────────────────────
+function _resetRunbookUI() {
+  document.getElementById('modal-runbook-content').classList.add('hidden');
+  document.getElementById('modal-runbook-loading').classList.add('hidden');
+  const genBtn = document.getElementById('modal-gen-runbook-btn');
+  genBtn.disabled = false; genBtn.textContent = '\u2728 Generate Runbook';
+  const applyBtn = document.getElementById('runbook-apply-btn');
+  applyBtn.disabled = false; applyBtn.textContent = '\u2713 Apply Remediation';
+  applyBtn.className = 'flex-1 py-2 rounded-lg text-xs font-semibold bg-emerald-900 hover:bg-emerald-800 text-emerald-200 border border-emerald-700 transition-colors';
+  applyBtn.classList.remove('hidden');
+  document.getElementById('runbook-undo-btn').classList.add('hidden');
+  document.getElementById('runbook-logs-section').classList.add('hidden');
+}
+
+async function generateRunbook() {
+  if(!currentFinding) return;
+  const genBtn = document.getElementById('modal-gen-runbook-btn');
+  const loading = document.getElementById('modal-runbook-loading');
+  const content = document.getElementById('modal-runbook-content');
+  genBtn.disabled = true; genBtn.textContent = 'Generating\u2026';
+  loading.classList.remove('hidden'); content.classList.add('hidden');
+  document.getElementById('runbook-logs-section').classList.add('hidden');
+  try {
+    const res = await fetch(API_BASE+'/dashboard/api/ai-runbook', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({finding_id:currentFinding.finding_id}),
+    });
+    const data = await res.json();
+    if(!res.ok) {
+      showToast(data.error||'Runbook generation failed','error');
+    } else {
+      renderRunbook(data.runbook, data.provider, data.model);
+      content.classList.remove('hidden');
+      genBtn.textContent = '\u21BB Regenerate';
+    }
+  } catch(e) { showToast('Network error: '+e.message,'error'); }
+  finally { loading.classList.add('hidden'); genBtn.disabled = false; }
+}
+
+function renderRunbook(runbook, provider, model) {
+  const risk = (runbook.risk_level||'LOW').toUpperCase();
+  const riskEl = document.getElementById('runbook-risk-badge');
+  riskEl.textContent = risk;
+  riskEl.className = 'text-xs px-2 py-0.5 rounded font-semibold ' +
+    ({LOW:'badge-low',MEDIUM:'badge-medium',HIGH:'badge-high',CRITICAL:'badge-critical'}[risk]||'badge-info');
+  document.getElementById('runbook-summary').textContent = runbook.summary||'';
+  document.getElementById('runbook-impact').textContent = runbook.estimated_impact||'';
+
+  document.getElementById('runbook-steps').innerHTML = (runbook.steps||[]).map(s=>`
+    <div class="bg-slate-800/70 rounded-lg p-3">
+      <div class="flex items-center gap-2 mb-1">
+        <span class="w-5 h-5 rounded-full bg-indigo-900 border border-indigo-700 text-indigo-300 text-xs flex items-center justify-center flex-shrink-0">${s.n||''}</span>
+        <span class="text-xs font-semibold text-slate-200">${esc(s.title||'')}</span>
+      </div>
+      <p class="text-xs text-slate-400 ml-7 mt-0.5">${esc(s.action||'')}</p>
+      ${s.api_call?`<code class="block text-xs text-cyan-400/90 font-mono ml-7 mt-1 break-all">${esc(s.api_call)}</code>`:''}
+      ${s.expected?`<p class="text-xs text-emerald-400/70 ml-7 mt-0.5">\u2192 ${esc(s.expected)}</p>`:''}
+    </div>`).join('');
+
+  document.getElementById('runbook-rollback').innerHTML = (runbook.rollback||[]).map(s=>
+    `<div class="py-1 text-xs"><span class="text-slate-500">${s.n}.</span> <span class="text-slate-300">${esc(s.action||'')}</span>${s.api_call?`<code class="block text-cyan-400/70 font-mono mt-0.5 ml-3">${esc(s.api_call)}</code>`:''}</div>`
+  ).join('');
+
+  const warns = runbook.warnings||[];
+  const warnEl = document.getElementById('runbook-warnings');
+  if(warns.length) {
+    warnEl.classList.remove('hidden');
+    warnEl.innerHTML = warns.map(w=>`<p class="text-xs text-yellow-400/80">\u26A0 ${esc(w)}</p>`).join('');
+  } else { warnEl.classList.add('hidden'); }
+
+  // Reset action buttons to default
+  const applyBtn = document.getElementById('runbook-apply-btn');
+  applyBtn.disabled = false; applyBtn.textContent = '\u2713 Apply Remediation';
+  applyBtn.className = 'flex-1 py-2 rounded-lg text-xs font-semibold bg-emerald-900 hover:bg-emerald-800 text-emerald-200 border border-emerald-700 transition-colors';
+  applyBtn.classList.remove('hidden');
+  document.getElementById('runbook-undo-btn').classList.add('hidden');
+}
+
+async function applyRunbook() {
+  if(!currentFinding) return;
+  const rt = currentFinding.resource_type||'';
+  const rid = (currentFinding.resource_id||'').split('/').pop() || currentFinding.resource_id;
+  if(!confirm(`Apply AI remediation to ${rt} — ${rid}?\n\nThis makes LIVE changes to your AWS resources.`)) return;
+  const btn = document.getElementById('runbook-apply-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<svg class="spin w-3 h-3 inline mr-1" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/></svg> Applying\u2026';
+  try {
+    const res = await fetch(API_BASE+'/dashboard/api/apply-runbook', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({finding_id:currentFinding.finding_id}),
+    });
+    const data = await res.json();
+    renderRunbookLogs(data.logs||[], data.success);
+    if(data.success) {
+      btn.textContent = '\u2713 Applied'; btn.disabled = true;
+      btn.className = 'flex-1 py-2 rounded-lg text-xs font-semibold bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed';
+      if(data.can_undo) document.getElementById('runbook-undo-btn').classList.remove('hidden');
+      showToast('Remediation applied successfully','success');
+      await loadFindings();
+    } else {
+      btn.disabled = false; btn.textContent = '\u21BB Retry Apply';
+      btn.className = 'flex-1 py-2 rounded-lg text-xs font-semibold bg-red-900 hover:bg-red-800 text-red-200 border border-red-700 transition-colors';
+      showToast('Remediation failed — see logs below','error');
+    }
+  } catch(e) { showToast('Network error: '+e.message,'error'); btn.disabled=false; btn.textContent='\u2713 Apply Remediation'; }
+}
+
+async function undoRunbook() {
+  if(!currentFinding) return;
+  if(!confirm('Undo the applied remediation?\nThis will RESTORE the original misconfigured state.')) return;
+  const btn = document.getElementById('runbook-undo-btn');
+  btn.disabled = true; btn.textContent = 'Undoing\u2026';
+  try {
+    const res = await fetch(API_BASE+'/dashboard/api/undo-runbook', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({finding_id:currentFinding.finding_id}),
+    });
+    const data = await res.json();
+    renderRunbookLogs(data.logs||[], data.success);
+    if(data.success) {
+      btn.classList.add('hidden');
+      const applyBtn = document.getElementById('runbook-apply-btn');
+      applyBtn.disabled = false; applyBtn.textContent = '\u2713 Apply Remediation';
+      applyBtn.className = 'flex-1 py-2 rounded-lg text-xs font-semibold bg-emerald-900 hover:bg-emerald-800 text-emerald-200 border border-emerald-700 transition-colors';
+      showToast('Remediation undone — original state restored','success');
+      await loadFindings();
+    } else { btn.disabled=false; btn.textContent='\u21A9 Undo'; showToast('Undo failed — see logs below','error'); }
+  } catch(e) { showToast('Network error: '+e.message,'error'); btn.disabled=false; btn.textContent='\u21A9 Undo'; }
+}
+
+function renderRunbookLogs(logs, success) {
+  const section = document.getElementById('runbook-logs-section');
+  const el = document.getElementById('runbook-logs');
+  section.classList.remove('hidden');
+  el.innerHTML = logs.map(l => {
+    const cls = (l.includes('\u2713')||l.includes('Verified')) ? 'text-emerald-400' :
+                (l.includes('\u2717')||l.startsWith('ERROR')||l.startsWith('EXCEPTION')) ? 'text-red-400' :
+                l.includes('WARNING') ? 'text-yellow-400' : 'text-slate-400';
+    return `<div class="${cls}">${esc(l)}</div>`;
+  }).join('');
+  el.scrollTop = el.scrollHeight;
+}
+
 // ── AI CONFIG MODAL ────────────────────────────────────────────────────────────
 let aiConfig = { provider: 'gemini', model: 'gemini-2.0-flash', has_api_key: false };
 let aiModels = [];
@@ -949,6 +1174,10 @@ async function openAIModal() {
   document.getElementById('ai-key-input').value = '';
   aiModels = [];
   await loadAIConfig();
+  // Auto-load models if we have a cached session key or a stored key
+  if (aiSessionKey || aiConfig.has_api_key) {
+    await validateAndLoadModels();
+  }
 }
 
 function closeAIModal() {
@@ -975,6 +1204,8 @@ async function loadAIConfig() {
     renderAIModelDropdown(data.provider, data.model, []);
     document.getElementById('ai-key-status').textContent = data.has_api_key ? '\u2705 API key stored' : '\u26A0\uFE0F No key stored yet';
     document.getElementById('ai-key-status').className = 'text-xs ' + (data.has_api_key ? 'text-green-400' : 'text-yellow-400');
+    const keyInput = document.getElementById('ai-key-input');
+    keyInput.placeholder = (data.has_api_key || aiSessionKey) ? '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022 (stored \u2014 enter new key to replace)' : 'Paste your API key here...';
   } catch(e) { console.error(e); }
 }
 
@@ -999,12 +1230,12 @@ function renderAIModelDropdown(provider, selectedModel, models) {
 }
 
 async function validateAndLoadModels() {
-  const provider = document.getElementById('ai-provider-select').value;
-  const apiKey   = document.getElementById('ai-key-input').value.trim();
-  const statusEl = document.getElementById('ai-validate-status');
-  const btn      = document.getElementById('ai-validate-btn');
-
-  if (!apiKey) { statusEl.textContent = 'Enter an API key first'; statusEl.className='text-xs text-yellow-400'; return; }
+  const provider  = document.getElementById('ai-provider-select').value;
+  const inputKey  = document.getElementById('ai-key-input').value.trim();
+  // Use input key, else session-cached key, else nothing (backend uses stored key)
+  const apiKey    = inputKey || aiSessionKey;
+  const statusEl  = document.getElementById('ai-validate-status');
+  const btn       = document.getElementById('ai-validate-btn');
 
   btn.disabled = true;
   btn.textContent = 'Validating\u2026';
@@ -1014,13 +1245,14 @@ async function validateAndLoadModels() {
     const res = await fetch(API_BASE + '/dashboard/api/ai-models', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ provider, api_key: apiKey }),
+      body: JSON.stringify({ provider, api_key: apiKey }),  // empty string → backend uses stored key
     });
     const data = await res.json();
     if (!res.ok || !data.valid) {
       statusEl.textContent = data.error || 'Invalid API key';
       statusEl.className = 'text-xs text-red-400';
     } else {
+      if (inputKey) aiSessionKey = inputKey;  // Cache validated key for this session
       statusEl.textContent = `\u2705 Key valid \u2014 ${data.models.length} model(s) loaded`;
       statusEl.className = 'text-xs text-green-400';
       renderAIModelDropdown(provider, aiConfig.model, data.models);
@@ -1030,7 +1262,7 @@ async function validateAndLoadModels() {
     statusEl.className = 'text-xs text-red-400';
   } finally {
     btn.disabled = false;
-    btn.textContent = 'Validate & Load Models';
+    btn.textContent = 'Validate & Load';
   }
 }
 
@@ -1059,7 +1291,7 @@ async function saveAIConfig() {
     if (res.ok) {
       aiConfig.provider = provider;
       aiConfig.model = model;
-      if (apiKey) aiConfig.has_api_key = true;
+      if (apiKey) { aiConfig.has_api_key = true; aiSessionKey = apiKey; }
       showToast(`AI config saved: ${provider} / ${model}`, 'success');
       document.getElementById('ai-key-status').textContent = '\u2705 API key stored';
       document.getElementById('ai-key-status').className = 'text-xs text-green-400';
