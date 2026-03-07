@@ -45,3 +45,6 @@ scripts/config.ps1
 # Internal notes — not for public repo
 KNOWLEDGEBASE.md
 docs/judge-qa.md
+
+# Architecture diagram folder (local tool, generated output)
+diagram/
