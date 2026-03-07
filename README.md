@@ -1,6 +1,6 @@
 # AWS Cloud Security Automation
 
-> AI-powered security incident detection and automated remediation on AWS — B.Tech capstone project
+> AI-powered security incident detection and automated remediation on AWS
 
 [![Terraform Validate](https://github.com/CynicPoet/aws-security-automation/actions/workflows/terraform-validate.yml/badge.svg)](https://github.com/CynicPoet/aws-security-automation/actions/workflows/terraform-validate.yml)
 
