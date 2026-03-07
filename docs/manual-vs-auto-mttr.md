@@ -129,6 +129,5 @@ the attack window by **99.7%**.
   Incident Response survey) and adjusted for a small-team cloud environment.
 - Automated timing measured from EventBridge rule trigger to Security Hub `RESOLVED` status update.
 - Category B human decision time assumes a responsive admin with 5–30 min email check cadence.
-- AI analysis time (3–8 s) measured against Gemini 2.5 Flash free tier; production Gemini Pro
-  averages 1–3 s.
+- AI analysis time (3–8 s) measured against Gemini 2.0 Flash free tier; paid tier averages 1–3 s.
 - Step Functions execution overhead (state transitions) < 100 ms per state.

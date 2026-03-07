@@ -41,3 +41,7 @@ secrets.json
 
 # Local deploy config (contains credentials — never commit)
 scripts/config.ps1
+
+# Internal notes — not for public repo
+KNOWLEDGEBASE.md
+docs/judge-qa.md
