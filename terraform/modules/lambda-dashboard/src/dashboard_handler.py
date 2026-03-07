@@ -1262,19 +1262,23 @@ def _do_terminate():
     except Exception as e:
         results["sns_error"] = str(e)
 
-    # 5. Delete EventBridge rule (targets must be removed first)
-    try:
+    # 5. Delete EventBridge rules (targets must be removed first)
+    def _delete_eb_rule(rule_name):
         try:
-            targets = events.list_targets_by_rule(Rule=EB_RULE_NAME)
+            targets = events.list_targets_by_rule(Rule=rule_name)
             tids = [t["Id"] for t in targets.get("Targets", [])]
             if tids:
-                events.remove_targets(Rule=EB_RULE_NAME, Ids=tids)
+                events.remove_targets(Rule=rule_name, Ids=tids)
         except Exception:
             pass
         try:
-            events.delete_rule(Name=EB_RULE_NAME)
+            events.delete_rule(Name=rule_name)
         except Exception:
             pass
+
+    try:
+        _delete_eb_rule(EB_RULE_NAME)
+        _delete_eb_rule("security-auto-ttl")  # cleanup auto-TTL rule if set
         results["eventbridge"] = "deleted"
     except Exception as e:
         results["eventbridge_error"] = str(e)
