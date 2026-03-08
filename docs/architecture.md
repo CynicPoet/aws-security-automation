@@ -32,6 +32,8 @@ Security Hub evaluates against CIS v1.4 / FSBP standards
   |-- generates finding on compliance failure
   v
 EventBridge Rule: securityhub-finding-rule
+  |-- source: aws.securityhub
+  |-- detail-type: Security Hub Findings - Imported
   |-- filter: Compliance.Status=FAILED, Workflow.Status=NEW,
   |           Severity in [MEDIUM, HIGH, CRITICAL], RecordState=ACTIVE
   v
@@ -65,7 +67,7 @@ Step Functions: SecurityRemediationStateMachine
         |     |
         |     +-- DetermineResourceType → route to playbook Lambda
         |     |     AwsS3Bucket       → security-auto-s3-remediation
-        |     |     AwsIamAccessKey   → security-auto-iam-remediation
+        |     |     AwsIamUser   → security-auto-iam-remediation
         |     |     AwsEc2SecurityGroup → security-auto-vpc-remediation
         |     |
         |     +-- VerifyRemediation (security-auto-verification)
@@ -75,11 +77,11 @@ Step Functions: SecurityRemediationStateMachine
         |     |
         |     +-- NotifyAdmin (security-auto-notification)
         |     |     stores task token in DynamoDB
-        |     |     sends rich HTML email via SNS with:
+        |     |     sends formatted text email via SNS with:
         |     |       AI analysis summary, risk assessment,
         |     |       1-click Approve / Reject / Manual links
         |     |
-        |     +-- waitForTaskToken (HeartbeatSeconds=3600)
+        |     +-- waitForTaskToken (HeartbeatSeconds=3600, TimeoutSeconds=3660)
         |     |
         |     +-- Admin clicks email link
         |     |     API Gateway → security-auto-approval-handler
@@ -88,6 +90,34 @@ Step Functions: SecurityRemediationStateMachine
         |     +-- ExecuteApprovedPlaybook → VerifyRemediation
         |     +-- DynamoDB updated: APPROVED / REJECTED / MANUAL_REVIEW
 ```
+
+### State Machine States (23 total)
+
+| State | Type | Target / Notes |
+|-------|------|----------------|
+| ParseFinding | Pass | Extracts finding fields from EventBridge event |
+| AIAnalysis | Task | `security-auto-ai-analyzer` (TimeoutSeconds=90) |
+| IsFalsePositive | Choice | Routes to SuppressFalsePositive if `is_false_positive=true` |
+| SuppressFalsePositive | Pass | Marks finding as false positive |
+| EndFalsePositive | Succeed | |
+| IsSafeToAutoRemediate | Choice | Routes to DetermineResourceType (auto) or NotifyAdmin (escalate) |
+| DetermineResourceType | Choice | `*S3*` → RemediateS3, `*Iam*` → RemediateIAM, `*SecurityGroup*` → RemediateVPC |
+| EndUnsupported | Succeed | Default for unsupported resource types |
+| RemediateS3 | Task | `security-auto-s3-remediation` |
+| RemediateIAM | Task | `security-auto-iam-remediation` |
+| RemediateVPC | Task | `security-auto-vpc-remediation` |
+| NotifyAdmin | Task | `security-auto-notification` (waitForTaskToken, HeartbeatSeconds=3600, TimeoutSeconds=3660) |
+| RouteAdminDecision | Choice | APPROVED → ExecuteApprovedPlaybook, REJECTED → EndRejected, MANUAL → EndManual |
+| ExecuteApprovedPlaybook | Choice | Same resource-type routing as DetermineResourceType |
+| ApprovedRemediateS3 | Task | `security-auto-s3-remediation` (with approved_action) |
+| ApprovedRemediateIAM | Task | `security-auto-iam-remediation` (with approved_action) |
+| ApprovedRemediateVPC | Task | `security-auto-vpc-remediation` (with approved_action) |
+| VerifyRemediation | Task | `security-auto-verification` (TimeoutSeconds=60) |
+| EndSuccess | Succeed | |
+| EndRejected | Succeed | |
+| EndManual | Succeed | |
+| EndTimeout | Succeed | Caught from HeartbeatTimeout / Timeout in NotifyAdmin |
+| HandleError | Fail | Catches all unhandled errors |
 
 ---
 
@@ -155,7 +185,7 @@ invocation time — changes take effect on next finding with zero infrastructure
 | Lambda | Resource Type | Action |
 |--------|---------------|--------|
 | `security-auto-s3-remediation` | AwsS3Bucket | Enables all 4 Block Public Access settings |
-| `security-auto-iam-remediation` | AwsIamAccessKey | Deactivates access keys |
+| `security-auto-iam-remediation` | AwsIamUser | Deactivates access keys + attaches deny-all policy |
 | `security-auto-vpc-remediation` | AwsEc2SecurityGroup | Revokes open-world ingress rules (0.0.0.0/0, ::/0) |
 | `security-auto-verification` | All | Confirms fix applied before marking RESOLVED |
 
@@ -179,7 +209,7 @@ Separate from the Step Functions pipeline — operates directly from the dashboa
 
 ### Notification Lambda (security-auto-notification)
 
-- Sends rich HTML email via SNS with AI analysis summary
+- Sends formatted plain-text email via SNS with AI analysis summary
 - Embeds 1-click Approve / Reject / Manual Review links (API Gateway URLs with task token)
 - Stores task token in DynamoDB `findings` table for dashboard to retrieve
 
@@ -197,17 +227,20 @@ Separate from the Step Functions pipeline — operates directly from the dashboa
 
 ### DynamoDB Tables
 
-**security-automation-findings** (PK: `finding_id`)
+**security-automation-findings** (PK: `finding_id`, PAY_PER_REQUEST)
+
+GSI: `status-created-index` (hash: `status`, range: `created_at`, ALL projection)
+TTL: `ttl_epoch` (30-day auto-expire)
 
 Fields: `resource_type`, `resource_id`, `severity`, `title`, `description`, `ai_analysis`,
 `recommended_actions`, `risk_level`, `status`, `task_token`, `created_at`, `updated_at`,
-`ttl_epoch` (30-day auto-expire), `environment`, `action_taken`, `runbook`, `runbook_status`,
+`ttl_epoch`, `environment`, `action_taken`, `runbook`, `runbook_status`,
 `runbook_logs`, `undo_data`
 
 Status values: `PENDING_APPROVAL` | `AUTO_REMEDIATED` | `RESOLVED` | `APPROVED` | `REJECTED`
 | `MANUAL_REVIEW` | `SUPPRESSED` | `FALSE_POSITIVE` | `FAILED`
 
-**security-automation-settings** (PK: `setting_key`)
+**security-automation-settings** (PK: `setting_key`, PAY_PER_REQUEST)
 
 Keys: `email_notifications`, `auto_remediation`, `ai_analysis_enabled`, `ai_provider`,
 `ai_model`, `batch_remediation_status`
@@ -218,6 +251,7 @@ Keys: `email_notifications`, `auto_remediation`, `ai_analysis_enabled`, `ai_prov
 
 - Name: `securityhub-finding-rule`
 - State: **DISABLED** by default (demo uses direct Step Functions invocation)
+- Source: `aws.securityhub`, Detail-type: `Security Hub Findings - Imported`
 - Filter: `Compliance.Status=FAILED`, `Workflow.Status=NEW`,
   `Severity.Label` in [MEDIUM, HIGH, CRITICAL], `RecordState=ACTIVE`
 - Target: `SecurityRemediationStateMachine`
@@ -244,7 +278,7 @@ Enforced in `response_validator.py` — runs after every AI response. AI cannot 
 | Default VPC security group | Force `safe_to_auto_remediate=False` |
 | `ServiceAccount=true` tag | Force `safe_to_auto_remediate=False` |
 | `Role=CI-Pipeline` tag | Force `safe_to_auto_remediate=False` |
-| `recommended_playbook` not in approved list | Force to `manual` |
+| `recommended_playbook` not in approved list | Force to `manual` (approved: `s3_remediation`, `iam_remediation`, `vpc_remediation`, `manual`, `none`) |
 | AI returns malformed JSON | Default to HIGH risk, escalate (fail-safe) |
 | AI API unreachable | Keyword-based fallback routing — pipeline never blocks |
 
@@ -255,7 +289,7 @@ Enforced in `response_validator.py` — runs after every AI response. AI cannot 
 | Role | Used by |
 |------|---------|
 | `SecurityAutomation-StepFunctionsRole` | State machine execution |
-| `SecurityAutomation-LambdaRemediationRole` | s3/iam/vpc remediation + verification |
+| `SecurityAutomation-LambdaRemediationRole` | s3/iam/vpc remediation Lambdas |
 | `SecurityAutomation-LambdaAIAnalyzerRole` | AI analyzer (Secrets Manager read, DynamoDB read) |
 | `SecurityAutomation-LambdaApprovalRole` | Approval handler (SFN SendTaskSuccess) |
 | `SecurityAutomation-LambdaNotificationRole` | Notification (SNS, DynamoDB, SFN) |

@@ -69,7 +69,7 @@ Click **Simulation Lab** in the dashboard header. Five scenarios available:
 
 1. Click **Run** next to B1 or B2
 2. Finding appears with status `PENDING_APPROVAL`
-3. Check admin email — rich HTML email arrives with:
+3. Check admin email — formatted text email arrives with:
    - AI analysis summary and risk assessment
    - Escalation reason (why AI flagged for approval)
    - **Approve** / **Reject** / **Manual Review** 1-click links

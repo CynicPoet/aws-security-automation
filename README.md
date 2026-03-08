@@ -106,7 +106,7 @@ terraform/
     lambda-dashboard/      # Web dashboard + all API routes
     step-functions/        # State machine ASL
     eventbridge/           # Security Hub -> Step Functions (DISABLED by default)
-    budget/                # Cost alert + hard-deny IAM action at $5
+    budget/                # Monthly budget alerts (80% actual, 100% forecasted)
 ```
 
 ---
@@ -301,9 +301,8 @@ This ensures billing stops automatically after a demo even if you forget to run 
 | Security Hub | $0.00 (account activation only, no standards) |
 | **Total** | **~$0.02/month** |
 
-**Budget guard:** An AWS Budgets action is configured to attach a `BudgetExceededDenyAll` IAM
-deny policy to the deployer user if monthly spend reaches $5. This acts as a hard circuit
-breaker against unexpected charges.
+**Budget guard:** AWS Budgets is configured with email alerts at 80% actual spend ($4) and
+100% forecasted spend ($5) to warn of unexpected charges.
 
 ---
 
@@ -331,7 +330,7 @@ aws-security-automation/
 │   ├── variables.tf                   # admin_email, aws_region, ai_provider, ai_model
 │   └── modules/
 │       ├── iam/                       # 8 IAM roles (least-privilege)
-│       ├── budget/                    # $5 hard-limit budget + deny-all action
+│       ├── budget/                    # $5 monthly budget with email alerts
 │       ├── security-hub/              # Security Hub account activation (no Config, no standards)
 │       ├── dynamodb/                  # findings + settings tables
 │       ├── cloudwatch/                # Log group + dashboard
@@ -339,7 +338,7 @@ aws-security-automation/
 │       ├── api-gateway/               # REST API (/approve /reject /dashboard/*)
 │       ├── lambda-remediation/        # S3, IAM, VPC, Verification playbooks
 │       ├── lambda-ai-analyzer/        # Gemini/Claude triage + safety overrides
-│       ├── lambda-notification/       # Rich HTML email with approval links
+│       ├── lambda-notification/       # Formatted text email with approve/reject links
 │       ├── lambda-approval/           # Step Functions task token handler
 │       ├── lambda-dashboard/          # Web dashboard + all /api/* routes
 │       ├── step-functions/            # State machine ASL + CW logging

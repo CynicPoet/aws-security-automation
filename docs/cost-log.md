@@ -74,19 +74,14 @@ bill ~12 hours after the recorder was stopped — this is normal AWS billing beh
 
 Configured in `terraform/modules/budget/main.tf`:
 
-| Threshold | Action |
-|-----------|--------|
-| $0.01 actual | Email alert |
-| $1.00 actual | Email alert |
-| $3.00 actual | Email alert |
-| $5.00 actual | **Attach `BudgetExceededDenyAll` IAM policy to `terraform-deployer`** |
+| Threshold | Type | Action |
+|-----------|------|--------|
+| 80% of $5 budget ($4.00) | Actual spend | Email alert to admin |
+| 100% of $5 budget ($5.00) | Forecasted spend | Email alert to admin |
 
-The $5 action attaches a deny-all IAM policy to the deployer user, blocking all AWS API calls
-from Terraform and scripts. This fires once per billing period. To re-enable after triggering:
-go to IAM Console → Users → terraform-deployer → Permissions → Detach the policy.
-
-Note: Budget Actions fire once per threshold per billing period. If the spend already exceeds
-the threshold at action creation time, it fires immediately.
+The monthly budget limit is set via `budget_limit_usd` (default: $5). Both thresholds
+trigger email notifications to the `admin_email` address. No automated deny-all IAM
+policy action is currently implemented — budget protection is alert-only.
 
 ---
 
