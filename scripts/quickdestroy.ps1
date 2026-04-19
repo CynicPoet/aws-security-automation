@@ -1,4 +1,4 @@
-# quickdestroy.ps1 — Full teardown for AWS Security Automation
+# quickdestroy.ps1 -- Full teardown for AWS Security Automation
 # Cleans up ALL resources: Terraform-managed + simulation leftovers + Config + Security Hub
 # Usage: .\scripts\quickdestroy.ps1
 
@@ -6,7 +6,7 @@ $ErrorActionPreference = "SilentlyContinue"   # don't abort on individual resour
 $SCRIPTS_DIR = $PSScriptRoot
 $TF_DIR      = [System.IO.Path]::GetFullPath("$SCRIPTS_DIR\..\terraform")
 
-# ── Load credentials ──────────────────────────────────────────────────────────
+# Load credentials
 $CONFIG = "$SCRIPTS_DIR\config.ps1"
 if (-not (Test-Path $CONFIG)) {
     Write-Host "ERROR: scripts\config.ps1 not found." -ForegroundColor Red; exit 1
@@ -16,7 +16,7 @@ $env:AWS_ACCESS_KEY_ID     = $AWS_ACCESS_KEY_ID
 $env:AWS_SECRET_ACCESS_KEY = $AWS_SECRET_ACCESS_KEY
 $env:AWS_DEFAULT_REGION    = $AWS_REGION
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# Helpers
 function Write-Header($msg) {
     Write-Host ""
     Write-Host "========================================" -ForegroundColor Red
@@ -33,12 +33,12 @@ function Write-SectionHeader($msg) {
     Write-Host "  $msg" -ForegroundColor Cyan
 }
 
-# ── Write Python helper to temp file (avoids all PowerShell/Python escaping issues) ──
+# Write Python helper to temp file (avoids all PowerShell/Python escaping issues)
 $tmpPy = "$env:TEMP\sa_destroy.py"
 
 Set-Content -Path $tmpPy -Encoding UTF8 -Value @'
 """
-quickdestroy helper — called by quickdestroy.ps1 with a mode argument.
+quickdestroy helper -- called by quickdestroy.ps1 with a mode argument.
 Modes: discover | sfn | config | securityhub | sim | post | verify
 """
 import boto3, sys, os
@@ -64,7 +64,7 @@ except Exception as e:
 mode = sys.argv[1] if len(sys.argv) > 1 else "verify"
 
 # =============================================================================
-# DISCOVER — show every billable resource before deletion
+# DISCOVER -- show every billable resource before deletion
 # =============================================================================
 if mode == "discover":
     found = {}
@@ -140,20 +140,20 @@ if mode == "discover":
              if "securityhub" in r["Name"].lower() or "security-auto" in r["Name"].lower()]
     if rules: found["EventBridge Rules"] = rules
 
-    # S3 — sim + config buckets
+    # S3 -- sim + config buckets
     s3 = boto3.client("s3", **creds)
     buckets = [b["Name"] for b in s3.list_buckets().get("Buckets", [])
                if b["Name"].startswith("sim-pub-") or
                   ("security-auto" in b["Name"] and "config" in b["Name"])]
     if buckets: found["S3 Buckets (sim + config)"] = buckets
 
-    # IAM — sim users
+    # IAM -- sim users
     iam = boto3.client("iam", **creds)
     users = [u["UserName"] for u in iam.list_users().get("Users", [])
              if u["UserName"].startswith("sim-")]
     if users: found["IAM Users (sim)"] = users
 
-    # EC2 — sim security groups
+    # EC2 -- sim security groups
     ec2 = boto3.client("ec2", **creds)
     sgs = ec2.describe_security_groups(
         Filters=[{"Name": "group-name", "Values": ["sim-sg-*"]}]
@@ -179,7 +179,7 @@ if mode == "discover":
     sys.exit(0)
 
 # =============================================================================
-# SFN — stop all running executions
+# SFN -- stop all running executions
 # =============================================================================
 if mode == "sfn":
     sfn = boto3.client("stepfunctions", **creds)
@@ -206,7 +206,7 @@ if mode == "sfn":
             tag_skip(f"SFN {sm['name']}: {e}")
 
 # =============================================================================
-# CONFIG — stop recorder, delete delivery channel, recorder, S3 bucket
+# CONFIG -- stop recorder, delete delivery channel, recorder, S3 bucket
 # =============================================================================
 if mode == "config":
     cfg = boto3.client("config", **creds)
@@ -217,13 +217,11 @@ if mode == "config":
         tag_skip("AWS Config: no recorders found")
     for r in recorders:
         rname = r["name"]
-        # Stop
         try:
             cfg.stop_configuration_recorder(ConfigurationRecorderName=rname)
             tag_del(f"Config recorder stopped: {rname}")
         except Exception as e:
             tag_skip(f"Stop recorder {rname}: {e}")
-        # Delete delivery channels (must go before recorder)
         try:
             channels = cfg.describe_delivery_channels().get("DeliveryChannels", [])
             if not channels:
@@ -236,14 +234,12 @@ if mode == "config":
                     tag_skip(f"Delivery channel {ch['name']}: {e}")
         except Exception as e:
             tag_skip(f"List delivery channels: {e}")
-        # Delete recorder
         try:
             cfg.delete_configuration_recorder(ConfigurationRecorderName=rname)
             tag_del(f"Config recorder deleted: {rname}")
         except Exception as e:
             tag_skip(f"Delete recorder {rname}: {e}")
 
-    # Delete Config S3 buckets
     try:
         buckets = [b["Name"] for b in s3.list_buckets().get("Buckets", [])
                    if "config-logs" in b["Name"] and "security-auto" in b["Name"]]
@@ -269,7 +265,7 @@ if mode == "config":
         tag_skip(f"Config S3 scan: {e}")
 
 # =============================================================================
-# SECURITYHUB — disable all active standards subscriptions
+# SECURITYHUB -- disable all active standards subscriptions
 # =============================================================================
 if mode == "securityhub":
     sh = boto3.client("securityhub", **creds)
@@ -286,14 +282,13 @@ if mode == "securityhub":
         tag_skip(f"Security Hub standards: {e}")
 
 # =============================================================================
-# SIM — simulation resources (not in Terraform state)
+# SIM -- simulation resources (not in Terraform state)
 # =============================================================================
 if mode == "sim":
     s3  = boto3.client("s3",  **creds)
     iam = boto3.client("iam", **creds)
     ec2 = boto3.client("ec2", **creds)
 
-    # Sim S3 buckets (sim-pub-*)
     try:
         buckets = [b["Name"] for b in s3.list_buckets().get("Buckets", [])
                    if b["Name"].startswith("sim-pub-")]
@@ -318,7 +313,6 @@ if mode == "sim":
     except Exception as e:
         tag_skip(f"Sim S3 scan: {e}")
 
-    # Sim IAM users (sim-b1-*, sim-*)
     try:
         users = [u["UserName"] for u in iam.list_users().get("Users", [])
                  if u["UserName"].startswith("sim-")]
@@ -343,7 +337,6 @@ if mode == "sim":
     except Exception as e:
         tag_skip(f"Sim IAM scan: {e}")
 
-    # Sim security groups (sim-sg-*)
     try:
         sgs = ec2.describe_security_groups(
             Filters=[{"Name": "group-name", "Values": ["sim-sg-*"]}]
@@ -363,13 +356,12 @@ if mode == "sim":
         tag_skip(f"Sim SG scan: {e}")
 
 # =============================================================================
-# POST — post-Terraform cleanup (CloudWatch logs, EventBridge rules)
+# POST -- post-Terraform cleanup (CloudWatch logs, EventBridge rules)
 # =============================================================================
 if mode == "post":
     logs = boto3.client("logs",   **creds)
     eb   = boto3.client("events", **creds)
 
-    # CloudWatch log groups
     try:
         lgs = [g["logGroupName"] for g in logs.describe_log_groups().get("logGroups", [])
                if "security-auto" in g["logGroupName"]]
@@ -384,7 +376,6 @@ if mode == "post":
     except Exception as e:
         tag_skip(f"CW log scan: {e}")
 
-    # EventBridge rules (in case Terraform missed them)
     try:
         rules = [r for r in eb.list_rules().get("Rules", [])
                  if "securityhub" in r["Name"].lower() or "security-auto" in r["Name"].lower()]
@@ -404,7 +395,7 @@ if mode == "post":
         tag_skip(f"EventBridge scan: {e}")
 
 # =============================================================================
-# VERIFY — final check; exit 1 if anything remains
+# VERIFY -- final check; exit 1 if anything remains
 # =============================================================================
 if mode == "verify":
     all_clean = True
@@ -456,8 +447,8 @@ if mode == "verify":
     sys.exit(0 if all_clean else 1)
 '@
 
-# ── Banner ────────────────────────────────────────────────────────────────────
-Write-Header "AWS Security Automation — Quick Destroy"
+# Banner
+Write-Header "AWS Security Automation -- Quick Destroy"
 Write-Host ""
 Write-Host "  Cleans up:" -ForegroundColor White
 Write-Host "    Step Functions executions" -ForegroundColor DarkGray
@@ -467,7 +458,7 @@ Write-Host "    Simulation resources  (S3 buckets, IAM users, security groups)" 
 Write-Host "    Terraform infrastructure  (Lambda, DynamoDB, API GW, SNS, SFN...)" -ForegroundColor DarkGray
 Write-Host "    CloudWatch log groups, EventBridge rules" -ForegroundColor DarkGray
 
-# ── Discovery ─────────────────────────────────────────────────────────────────
+# Discovery
 Write-Host ""
 Write-Host "Scanning account..." -ForegroundColor Cyan
 py -3 $tmpPy discover
@@ -477,28 +468,28 @@ Write-Host ""
 $confirm = Read-Host "Type 'yes' to delete all resources above"
 if ($confirm -ne "yes") {
     Write-Host ""
-    Write-Host "Aborted — nothing was deleted." -ForegroundColor Yellow
+    Write-Host "Aborted -- nothing was deleted." -ForegroundColor Yellow
     Remove-Item $tmpPy -ErrorAction SilentlyContinue
     exit 0
 }
 
-# ── Step 1: Stop Step Functions executions ────────────────────────────────────
+# Step 1: Stop Step Functions executions
 Write-Step 1 6 "Stopping Step Functions executions"
 py -3 $tmpPy sfn
 
-# ── Step 2: AWS Config ────────────────────────────────────────────────────────
+# Step 2: AWS Config
 Write-Step 2 6 "Removing AWS Config (recorder + delivery channel + S3)"
 py -3 $tmpPy config
 
-# ── Step 3: Security Hub standards ───────────────────────────────────────────
+# Step 3: Security Hub standards
 Write-Step 3 6 "Disabling Security Hub standards"
 py -3 $tmpPy securityhub
 
-# ── Step 4: Simulation resources ─────────────────────────────────────────────
+# Step 4: Simulation resources
 Write-Step 4 6 "Deleting simulation resources (S3 buckets, IAM users, security groups)"
 py -3 $tmpPy sim
 
-# ── Step 5: Terraform destroy ─────────────────────────────────────────────────
+# Step 5: Terraform destroy
 Write-Step 5 6 "Running Terraform destroy"
 $tfState = "$TF_DIR\terraform.tfstate"
 if (Test-Path $tfState) {
@@ -510,21 +501,21 @@ if (Test-Path $tfState) {
     $tfExit = $LASTEXITCODE
     Pop-Location
     if ($tfExit -ne 0) {
-        Write-Host "  [WARN]  Terraform destroy had errors — continuing with manual cleanup." -ForegroundColor Yellow
+        Write-Host "  [WARN]  Terraform destroy had errors -- continuing with manual cleanup." -ForegroundColor Yellow
     } else {
         Write-Host "  [DELETED]   Terraform-managed infrastructure" -ForegroundColor Red
     }
 } else {
-    Write-Host "  [SKIPPED]   No terraform.tfstate — infrastructure was not deployed via Terraform" -ForegroundColor Gray
+    Write-Host "  [SKIPPED]   No terraform.tfstate -- infrastructure was not deployed via Terraform" -ForegroundColor Gray
 }
 
-# ── Step 6: Post-Terraform cleanup ────────────────────────────────────────────
+# Step 6: Post-Terraform cleanup
 Write-Step 6 6 "Post-Terraform cleanup (CloudWatch logs, EventBridge rules)"
 py -3 $tmpPy post
 
-# ── Final verification ────────────────────────────────────────────────────────
+# Final verification
 Write-Host ""
-Write-Host "========================================"  -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "  Final Verification" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 py -3 $tmpPy verify
@@ -533,7 +524,7 @@ $verifyExit = $LASTEXITCODE
 # Cleanup temp file
 Remove-Item $tmpPy -ErrorAction SilentlyContinue
 
-# ── Result ────────────────────────────────────────────────────────────────────
+# Result
 Write-Host ""
 if ($verifyExit -eq 0) {
     Write-Host "========================================" -ForegroundColor Green

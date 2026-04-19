@@ -1,4 +1,4 @@
-# quickdeploy.ps1 — One-click deploy for AWS Security Automation
+# quickdeploy.ps1 -- One-click deploy for AWS Security Automation
 # Usage: .\scripts\quickdeploy.ps1
 # Credentials live in scripts\config.ps1 (gitignored)
 
@@ -27,7 +27,7 @@ Write-Host "`n========================================" -ForegroundColor Cyan
 Write-Host "  AWS Security Automation - Quick Deploy" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 
-# ── STEP 1: FORMAT ────────────────────────────────────────────────────────────
+# STEP 1: FORMAT
 Write-Step 1 6 "Terraform format check..."
 terraform -chdir="$TF_DIR" fmt -check -recursive 2>&1 | Out-Null
 if ($LASTEXITCODE -ne 0) {
@@ -36,13 +36,13 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-OK "Format OK"
 
-# ── STEP 2: VALIDATE ──────────────────────────────────────────────────────────
+# STEP 2: VALIDATE
 Write-Step 2 6 "Validating configuration..."
 terraform -chdir="$TF_DIR" validate
 if ($LASTEXITCODE -ne 0) { Write-Host "Validation failed." -ForegroundColor Red; exit 1 }
 Write-OK "Configuration valid"
 
-# ── STEP 3: APPLY ─────────────────────────────────────────────────────────────
+# STEP 3: APPLY
 Write-Step 3 6 "Deploying infrastructure (~2-3 minutes)..."
 terraform -chdir="$TF_DIR" apply `
     -var="admin_email=$ADMIN_EMAIL" `
@@ -51,16 +51,15 @@ terraform -chdir="$TF_DIR" apply `
 if ($LASTEXITCODE -ne 0) { Write-Host "Apply failed." -ForegroundColor Red; exit 1 }
 Write-OK "Infrastructure deployed"
 
-# ── STEP 4: GET URL ───────────────────────────────────────────────────────────
+# STEP 4: GET URL
 Write-Step 4 6 "Getting dashboard URL..."
 $base_url     = terraform -chdir="$TF_DIR" output -raw api_gateway_base_url
 $dashboard_url = "$base_url/dashboard"
 Write-OK "Dashboard URL: $dashboard_url"
 
-# ── STEP 5: SET GEMINI KEY ────────────────────────────────────────────────────
+# STEP 5: SET GEMINI KEY
 Write-Step 5 6 "Setting AI API key..."
 if ($GEMINI_API_KEY -ne "") {
-    # Write Python to a temp file to avoid all PowerShell/Python string escaping issues
     $env:_SA_GEMINI_KEY = $GEMINI_API_KEY
     $tmpPy = "$env:TEMP\sa_gemini.py"
     $pyContent = @'
@@ -82,7 +81,7 @@ print("Gemini key saved.")
     Write-Info "No Gemini key in config.ps1 - AI uses smart fallback routing (still works)"
 }
 
-# ── STEP 6: AUTO-TTL ──────────────────────────────────────────────────────────
+# STEP 6: AUTO-TTL
 Write-Step 6 6 "Auto-terminate timer (press Enter to skip)..."
 Write-Host ""
 Write-Host "  This creates a one-time EventBridge rule that auto-destroys all" -ForegroundColor Gray
@@ -110,7 +109,6 @@ TTL_H   = int(os.environ["_SA_TTL_HOURS"])
 
 creds = dict(region_name=REGION, aws_access_key_id=KEY, aws_secret_access_key=SEC)
 
-# Find dashboard Lambda
 lam = boto3.client("lambda", **creds)
 dashboard_fn = None
 pager = lam.get_paginator("list_functions")
@@ -130,7 +128,6 @@ fn_arn     = lam.get_function(FunctionName=dashboard_fn)["Configuration"]["Funct
 account_id = boto3.client("sts", **creds).get_caller_identity()["Account"]
 rule_arn   = f"arn:aws:events:{REGION}:{account_id}:rule/security-auto-ttl"
 
-# Grant EventBridge permission to invoke Lambda
 try:
     lam.add_permission(
         FunctionName=dashboard_fn,
@@ -140,9 +137,8 @@ try:
         SourceArn=rule_arn,
     )
 except lam.exceptions.ResourceConflictException:
-    pass  # permission already exists
+    pass
 
-# Create one-time cron rule
 fire_at     = datetime.now(timezone.utc) + timedelta(hours=TTL_H)
 cron_expr   = f"cron({fire_at.minute} {fire_at.hour} {fire_at.day} {fire_at.month} ? {fire_at.year})"
 eb          = boto3.client("events", **creds)
@@ -172,13 +168,13 @@ print(f"AUTO_TTL_SET:{local_time}")
         Write-OK "Auto-terminate scheduled at $fireTime (+${ttlHours}h)"
     } else {
         Write-Host "  WARN  TTL setup had issues: $ttlResult" -ForegroundColor Yellow
-        Write-Info "Infrastructure will NOT auto-terminate — destroy manually when done"
+        Write-Info "Infrastructure will NOT auto-terminate -- destroy manually when done"
     }
 } else {
-    Write-Info "Skipped — remember to run quickdestroy.ps1 or use the dashboard Terminate button when done"
+    Write-Info "Skipped -- remember to run quickdestroy.ps1 or use the dashboard Terminate button when done"
 }
 
-# ── DONE ──────────────────────────────────────────────────────────────────────
+# DONE
 Write-Host "`n========================================" -ForegroundColor Green
 Write-Host "  DEPLOYMENT COMPLETE" -ForegroundColor Green
 Write-Host "========================================" -ForegroundColor Green
