@@ -193,7 +193,7 @@ def update_settings(body_str):
 def get_ai_config():
     """Return current AI provider, model, and whether an API key is stored."""
     provider = _get_setting("ai_provider", "gemini")
-    model    = _get_setting("ai_model", "gemini-2.0-flash")
+    model    = _get_setting("ai_model", "gemini-2.5-flash")
     # Check whether a non-placeholder key exists in Secrets Manager
     has_key = False
     try:
@@ -295,7 +295,7 @@ def _fetch_gemini_models(api_key: str):
         if "generateContent" not in supported:
             continue
         # Skip noisy embedding / vision-only / aqa models
-        skip_keywords = ["embedding", "aqa", "vision", "learnlm", "exp", "preview", "latest"]
+        skip_keywords = ["embedding", "aqa", "vision", "learnlm", "latest"]
         if any(kw in model_id.lower() for kw in skip_keywords):
             continue
         models.append({"id": model_id, "name": display})
@@ -304,9 +304,9 @@ def _fetch_gemini_models(api_key: str):
     models.sort(key=lambda x: (0 if "flash" in x["id"] else 1, x["id"]))
     if not models:
         return respond(200, {"valid": True, "models": [
+            {"id": "gemini-2.5-flash",      "name": "Gemini 2.5 Flash"},
             {"id": "gemini-2.0-flash",      "name": "Gemini 2.0 Flash"},
-            {"id": "gemini-2.0-flash-lite",  "name": "Gemini 2.0 Flash Lite"},
-            {"id": "gemini-1.5-flash",       "name": "Gemini 1.5 Flash"},
+            {"id": "gemini-2.0-flash-lite", "name": "Gemini 2.0 Flash Lite"},
         ]})
     return respond(200, {"valid": True, "models": models})
 
@@ -359,7 +359,7 @@ def _get_ai_api_key():
 def _call_ai_direct(prompt: str, max_tokens: int = 900):
     """Call configured AI provider directly. Returns (text, error_str)."""
     provider = _get_setting("ai_provider", "gemini")
-    model    = _get_setting("ai_model", "gemini-2.0-flash")
+    model    = _get_setting("ai_model", "gemini-2.5-flash")
     api_key  = _get_ai_api_key()
     if not api_key:
         return None, "AI API key not configured in Secrets Manager"
@@ -370,12 +370,13 @@ def _call_ai_direct(prompt: str, max_tokens: int = 900):
 
 def _call_gemini_raw(api_key, model, prompt, max_tokens):
     """Call Gemini API with automatic model fallback on 429. Returns (text, error)."""
-    chain = [model] + [m for m in ("gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash") if m != model]
+    chain = [model] + [m for m in ("gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-lite") if m != model]
+    last_err = None
     for m in chain:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={api_key}"
         payload = json.dumps({
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0, "responseMimeType": "application/json"},
+            "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0, "responseMimeType": "application/json", "thinkingConfig": {"thinkingBudget": 0}},
             "safetySettings": [{"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}],
         }).encode()
         req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
@@ -384,13 +385,15 @@ def _call_gemini_raw(api_key, model, prompt, max_tokens):
                 body = json.loads(r.read().decode())
             return body["candidates"][0]["content"]["parts"][0]["text"].strip(), None
         except urllib.error.HTTPError as exc:
-            err = exc.read().decode()[:200]
+            err = exc.read().decode()[:300]
+            last_err = f"[{m}] HTTP {exc.code}: {err}"
             if exc.code == 429 or exc.code == 404 or "RESOURCE_EXHAUSTED" in err:
                 continue
             return None, f"Gemini HTTP {exc.code}: {err}"
         except Exception as exc:
+            last_err = str(exc)
             return None, f"Gemini error: {exc}"
-    return None, "All Gemini models exhausted"
+    return None, f"All Gemini models exhausted. Last error: {last_err}"
 
 
 def _call_claude_raw(api_key, model, prompt, max_tokens):
@@ -691,7 +694,7 @@ def generate_runbook(body_str):
         return respond(500, {"error": f"Failed to store runbook: {e}"})
 
     provider = _get_setting("ai_provider", "gemini")
-    model    = _get_setting("ai_model", "gemini-2.0-flash")
+    model    = _get_setting("ai_model", "gemini-2.5-flash")
     return respond(200, {
         "runbook": runbook,
         "provider": provider,

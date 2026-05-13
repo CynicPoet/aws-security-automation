@@ -1,10 +1,10 @@
 """
 gemini_provider.py — Google Gemini AI provider with model fallback chain.
 
-Free-tier model priority (all 0 usage by default):
-  1. gemini-2.0-flash       (15 RPM, 1M TPM, 1.5B TPD)
-  2. gemini-2.0-flash-lite  (30 RPM, lighter)
-  3. gemini-1.5-flash        (15 RPM, 1M TPM, 50 requests/day free)
+Free-tier model priority:
+  1. gemini-2.5-flash       (latest stable, recommended)
+  2. gemini-2.0-flash       (previous gen fallback)
+  3. gemini-2.0-flash-lite  (lighter fallback)
 
 If a model returns HTTP 429 (RESOURCE_EXHAUSTED) or is unavailable, the
 provider automatically falls back to the next model in the chain.
@@ -19,9 +19,9 @@ GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
 # Fallback chain: primary → fallback → last-resort
 FALLBACK_CHAIN = [
+    "gemini-2.5-flash",
     "gemini-2.0-flash",
     "gemini-2.0-flash-lite",
-    "gemini-1.5-flash",
 ]
 
 # Max output tokens — JSON response only; 600 is sufficient for structured output
@@ -70,6 +70,7 @@ class GeminiProvider(BaseAIProvider):
                 "temperature": 0.1,
                 "topP": 0.8,
                 "responseMimeType": "application/json",
+                "thinkingConfig": {"thinkingBudget": 0},
             },
             "safetySettings": [
                 {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
