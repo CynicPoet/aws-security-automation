@@ -43,9 +43,9 @@ secrets.json
 scripts/config.ps1
 
 # Internal notes — not for public repo
-KNOWLEDGEBASE.md
+//KNOWLEDGEBASE.md
 docs/judge-qa.md
-DOCUMENTATION.md
+//DOCUMENTATION.md
 
 # Architecture diagram folder (local tool, generated output)
 diagram/
